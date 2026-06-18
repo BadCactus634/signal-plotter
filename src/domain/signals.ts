@@ -1,11 +1,5 @@
 export type ViewMode = 'time' | 'discrete' | 'frequency'
 
-export type NotationSettings = {
-  timeVariable: 't' | 'tau'
-  discreteVariable: 'n' | 'k'
-  frequencyVariable: 'f' | 'omega'
-}
-
 export type SignalKind =
   | 'sine'
   | 'cosine'
@@ -25,110 +19,32 @@ export type SignalKind =
   | 'triN'
 
 export type SignalNode =
-  | {
-      kind: 'constant'
-      value: number
-    }
-  | {
-      kind: 'formula'
-      expression: string
-    }
-  | {
-      kind: 'sine'
-      amplitude: number
-      frequency: number
-      phase: number
-      offset: number
-    }
-  | {
-      kind: 'cosine'
-      amplitude: number
-      frequency: number
-      phase: number
-      offset: number
-    }
-  | {
-      kind: 'step'
-      height: number
-      shift: number
-    }
-  | {
-      kind: 'impulse'
-      amplitude: number
-      shift: number
-    }
-  | {
-      kind: 'rect'
-      width: number
-      height: number
-      center: number
-    }
-  | {
-      kind: 'triangle'
-      width: number
-      height: number
-      center: number
-    }
-  | {
-      kind: 'delay'
-      amount: number
-      child: SignalNode
-    }
-  | {
-      kind: 'sum'
-      children: SignalNode[]
-    }
-  | {
-      kind: 'product'
-      children: SignalNode[]
-    }
-  | {
-      kind: 'conv'
-      left: SignalNode
-      right: SignalNode
-    }
-  // --- Segnali elementari continui aggiuntivi del corso ---
-  | {
-      kind: 'sgn'  // sgn(t) = 2ε(t) - 1 (con sgn(0)=0)
-    }
-  | {
-      kind: 'complexExp'  // Re{e^{j(2πf₀t+φ)}} = cos(2πf₀t+φ)
-      f0: number
-      phi: number
-    }
-  | {
-      kind: 'periodicExt'  // Estensione periodica: p(t) = Σ_k p₀(t - kT)
-      prototype: SignalNode
-      period: number
-    }
-  // --- Segnali elementari discreti aggiuntivi del corso ---
-  | {
-      kind: 'discreteExp'  // a^n (reale), utile con ε[n]: a^n * step(1,0)
-      base: number
-    }
-  | {
-      kind: 'rectN'  // rect_N[n] = 1 per 0 ≤ n < N, 0 altrimenti
-      N: number
-    }
-  | {
-      kind: 'triN'   // tri_N[n] = 1 - |n/N| per |n| ≤ N, 0 altrimenti
-      N: number
-    }
+  | { kind: 'constant'; value: number }
+  | { kind: 'formula'; expression: string }
+  | { kind: 'sine'; amplitude: number; frequency: number; phase: number; offset: number }
+  | { kind: 'cosine'; amplitude: number; frequency: number; phase: number; offset: number }
+  | { kind: 'step'; height: number; shift: number }
+  | { kind: 'impulse'; amplitude: number; shift: number }
+  | { kind: 'rect'; width: number; height: number; center: number }
+  | { kind: 'triangle'; width: number; height: number; center: number }
+  | { kind: 'delay'; amount: number; child: SignalNode }
+  | { kind: 'sum'; children: SignalNode[] }
+  | { kind: 'product'; children: SignalNode[] }
+  | { kind: 'conv'; left: SignalNode; right: SignalNode }
+  | { kind: 'sgn' }
+  | { kind: 'complexExp'; f0: number; phi: number }
+  | { kind: 'periodicExt'; prototype: SignalNode; period: number }
+  | { kind: 'discreteExp'; base: number }
+  | { kind: 'rectN'; N: number }
+  | { kind: 'triN'; N: number }
 
 export type ParseResult =
-  | {
-      ok: true
-      signal: SignalNode
-    }
-  | {
-      ok: false
-      error: string
-    }
+  | { ok: true; signal: SignalNode }
+  | { ok: false; error: string }
 
-export type SignalSample = {
-  x: number
-  y: number
-}
+export type SignalSample = { x: number; y: number }
+
+export type ImpulseMarker = { position: number; amplitude: number }
 
 export type SignalStats = {
   peak: number
@@ -142,219 +58,34 @@ export type SignalStats = {
   classification: 'energy' | 'power' | 'finite-window'
 }
 
+// ─── Tokenizer ────────────────────────────────────────────────────────────────
+
 const TOKEN_REGEX = /\s*(\\pi|π|[A-Za-z_][A-Za-z0-9_]*|\d*\.\d+|\d+|\+|-|\*|\/|\^|\(|\)|\[|\]|,)/gy
-
-class Parser {
-  private readonly tokens: string[]
-  private index = 0
-
-  constructor(expression: string) {
-    this.tokens = tokenize(expression)
-  }
-
-  parse(): SignalNode {
-    const node = this.parseSum()
-    if (!this.isAtEnd()) {
-      throw new Error(`Unexpected token: ${this.peek()}`)
-    }
-    return node
-  }
-
-  private parseSum(): SignalNode {
-    const terms: SignalNode[] = [this.parseProduct()]
-
-    while (this.match('+')) {
-      terms.push(this.parseProduct())
-    }
-
-    return terms.length === 1 ? terms[0] : { kind: 'sum', children: terms }
-  }
-
-  private parseProduct(): SignalNode {
-    const factors: SignalNode[] = [this.parseUnary()]
-
-    while (true) {
-      if (this.match('*')) {
-        factors.push(this.parseUnary())
-        continue
-      }
-
-      if (this.isImplicitProductStart(this.peek())) {
-        factors.push(this.parseUnary())
-        continue
-      }
-
-      break
-    }
-
-    return factors.length === 1 ? factors[0] : { kind: 'product', children: factors }
-  }
-
-  private parseUnary(): SignalNode {
-    if (this.match('-')) {
-      return {
-        kind: 'product',
-        children: [{ kind: 'sine', amplitude: -1, frequency: 0, phase: 0, offset: 0 }, this.parseUnary()],
-      }
-    }
-
-    return this.parsePrimary()
-  }
-
-  private parsePrimary(): SignalNode {
-    if (this.match('(')) {
-      const node = this.parseSum()
-      this.consume(')')
-      return node
-    }
-
-    const token = this.peek()
-    if (isNumberToken(token)) {
-      this.advance()
-      return { kind: 'constant', value: Number(token) }
-    }
-
-    if (isPiToken(token)) {
-      this.advance()
-      return { kind: 'constant', value: Math.PI }
-    }
-
-    if (isIdentifierToken(token)) {
-      const name = token?.toLowerCase() ?? ''
-      this.advance()
-      if (this.match('(')) {
-        const args = this.parseArguments()
-        this.consume(')')
-
-        if (name === 'x' && args.length === 1) {
-          return toSignalNode(args[0])
-        }
-
-        return buildNode(name, args)
-      }
-
-      if (name === 'pi' || name === 'π') {
-        return { kind: 'constant', value: Math.PI }
-      }
-
-      if (name === 'e') {
-        return { kind: 'constant', value: Math.E }
-      }
-    }
-
-    throw new Error(`Unexpected token: ${token ?? 'end of input'}`)
-  }
-
-  private parseArguments(): SignalNode[] | number[] {
-    const items: Array<SignalNode | number> = []
-
-    if (this.match(')')) {
-      this.index -= 1
-      return items as number[]
-    }
-
-    while (true) {
-      items.push(this.parseArgument())
-      if (!this.match(',')) {
-        break
-      }
-    }
-
-    return items as number[]
-  }
-
-  private parseArgument(): SignalNode | number {
-    const token = this.peek()
-
-    if (token === '(' || token === '[') {
-      return this.parsePrimary()
-    }
-
-    if (isNumberToken(token)) {
-      this.advance()
-      return Number(token)
-    }
-
-    if (isPiToken(token)) {
-      this.advance()
-      return Math.PI
-    }
-
-    if (isIdentifierToken(token)) {
-      const next = this.peek(1)
-      if (next === '(') {
-        return this.parsePrimary()
-      }
-
-      const name = token?.toLowerCase() ?? ''
-      if (name === 'pi' || name === 'e') {
-        this.advance()
-        return name === 'pi' ? Math.PI : Math.E
-      }
-    }
-
-    throw new Error(`Invalid argument: ${token ?? 'end of input'}`)
-  }
-
-  private match(expected: string): boolean {
-    if (this.peek() !== expected) {
-      return false
-    }
-    this.index += 1
-    return true
-  }
-
-  private consume(expected: string): void {
-    if (!this.match(expected)) {
-      throw new Error(`Expected '${expected}' but found '${this.peek() ?? 'end of input'}'`)
-    }
-  }
-
-  private peek(offset = 0): string | undefined {
-    return this.tokens[this.index + offset]
-  }
-
-  private advance(): void {
-    this.index += 1
-  }
-
-  private isAtEnd(): boolean {
-    return this.index >= this.tokens.length
-  }
-
-  private isImplicitProductStart(token: string | undefined): boolean {
-    return token === '(' || isNumberToken(token) || isIdentifierToken(token)
-  }
-}
 
 function tokenize(expression: string): string[] {
   const tokens: string[] = []
   TOKEN_REGEX.lastIndex = 0
-
   let match = TOKEN_REGEX.exec(expression)
   while (match) {
     tokens.push(match[1])
     match = TOKEN_REGEX.exec(expression)
   }
-
   return tokens
-}
-
-export function normalizeSignalInput(expression: string): string {
-  return expression
-    .replace(/\\pi|π/g, 'π')
-    .replace(/\\tau|τ/g, 'tau')
-    .replace(/\\omega|ω/g, 'omega')
-    .replace(/\\delta|δ/g, 'delta')
-    .replace(/\\phi|φ/g, 'phi')
-    .replace(/\\theta|θ/g, 'theta')
-    .replace(/\[/g, '(')
-    .replace(/\]/g, ')')
 }
 
 function isPiToken(token: string | undefined): boolean {
   return token === 'π' || token === 'pi'
 }
+
+function isNumberToken(token: string | undefined): boolean {
+  return typeof token === 'string' && (/^\d*\.\d+$/.test(token) || /^\d+$/.test(token))
+}
+
+function isIdentifierToken(token: string | undefined): boolean {
+  return typeof token === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(token)
+}
+
+// ─── Formula functions ────────────────────────────────────────────────────────
 
 const FORMULA_FUNCTIONS: Record<string, (...args: number[]) => number> = {
   sin: Math.sin,
@@ -373,28 +104,41 @@ const FORMULA_FUNCTIONS: Record<string, (...args: number[]) => number> = {
   min: Math.min,
   max: Math.max,
   sign: Math.sign,
-  step: (value) => (value >= 0 ? 1 : 0),
-  u: (value) => (value >= 0 ? 1 : 0),
-  rect: (value, width = 1) => (Math.abs(value) <= width / 2 ? 1 : 0),
-  tri: (value, width = 1) => {
-    const distance = Math.abs(value)
-    if (distance > width / 2) {
-      return 0
-    }
-    return 1 - distance / (width / 2)
+  // ε(t): 0.5 at t=0 (def. corso Dalai)
+  step: (value) => Math.abs(value) < 1e-10 ? 0.5 : value > 0 ? 1 : 0,
+  u: (value) => Math.abs(value) < 1e-10 ? 0.5 : value > 0 ? 1 : 0,
+  // rect(t, w=1): 1 per |t|<w/2, 0.5 per |t|=w/2
+  rect: (value, width = 1) => {
+    const dist = Math.abs(value)
+    const half = (width || 1) / 2
+    if (Math.abs(dist - half) < 1e-10) return 0.5
+    return dist < half ? 1 : 0
   },
-  delta: (value) => (Math.abs(value) < 1e-9 ? 1 : 0),
-  // sinc normalizzato: sinc(t) = sin(πt)/(πt), sinc(0) = 1 (def. corso Dalai)
-  sinc: (value) => (Math.abs(value) < 1e-9 ? 1 : Math.sin(Math.PI * value) / (Math.PI * value)),
-  // sgn(t) = +1 per t>0, 0 per t=0, -1 per t<0
-  sgn: (value) => (Math.abs(value) < 1e-10 ? 0 : value > 0 ? 1 : -1),
+  // tri(t, h=1): 1-|t/h| per |t|≤h (halfWidth convention: tri(t)=1-|t| per |t|≤1)
+  tri: (value, halfWidth = 1) => {
+    const dist = Math.abs(value)
+    const h = halfWidth || 1
+    if (dist > h) return 0
+    return 1 - dist / h
+  },
+  // delta approssimato con soglia 0.04 (circa metà del passo tipico di campionamento)
+  delta: (value) => Math.abs(value) < 0.04 ? 1 : 0,
+  // sinc normalizzato: sinc(t) = sin(πt)/(πt), sinc(0)=1
+  sinc: (value) => Math.abs(value) < 1e-9 ? 1 : Math.sin(Math.PI * value) / (Math.PI * value),
+  sgn: (value) => Math.abs(value) < 1e-10 ? 0 : value > 0 ? 1 : -1,
 }
 
 const formulaCache = new Map<string, (x: number) => number>()
 
+// ─── FormulaParser ────────────────────────────────────────────────────────────
+
 class FormulaParser {
   private readonly tokens: string[]
   private index = 0
+  readonly scope: Record<string, number> = {
+    x: 0, t: 0, tau: 0, n: 0, k: 0, f: 0, omega: 0,
+    a: 1, b: 1, phi: 0, theta: 0, phi0: 0, t0: 0, a0: 1, b0: 1,
+  }
 
   constructor(expression: string) {
     this.tokens = tokenize(expression)
@@ -402,141 +146,81 @@ class FormulaParser {
 
   parse(): number {
     const value = this.parseSum()
-    if (!this.isAtEnd()) {
-      throw new Error(`Unexpected token: ${this.peek()}`)
-    }
+    if (!this.isAtEnd()) throw new Error(`Unexpected token: ${this.peek()}`)
     return value
   }
 
   private parseSum(): number {
     let value = this.parseProduct()
-
     while (this.match('+') || this.match('-')) {
-      const operator = this.previous()
+      const op = this.previous()
       const right = this.parseProduct()
-      value = operator === '+' ? value + right : value - right
+      value = op === '+' ? value + right : value - right
     }
-
     return value
   }
 
   private parseProduct(): number {
     let value = this.parsePower()
-
     while (true) {
-      if (this.match('*')) {
-        value *= this.parsePower()
-        continue
-      }
-
+      if (this.match('*')) { value *= this.parsePower(); continue }
       if (this.match('/')) {
-        const divisor = this.parsePower()
-        value = divisor === 0 ? 0 : value / divisor
+        const d = this.parsePower()
+        value = d === 0 ? 0 : value / d
         continue
       }
-
-      if (this.isImplicitProductStart(this.peek())) {
-        value *= this.parsePower()
-        continue
-      }
-
+      if (this.isImplicitProductStart(this.peek())) { value *= this.parsePower(); continue }
       break
     }
-
     return value
   }
 
   private parsePower(): number {
     let value = this.parseUnary()
-
-    if (this.match('^')) {
-      const exponent = this.parsePower()
-      value = Math.pow(value, exponent)
-    }
-
+    if (this.match('^')) value = Math.pow(value, this.parsePower())
     return value
   }
 
   private parseUnary(): number {
-    if (this.match('+')) {
-      return this.parseUnary()
-    }
-
-    if (this.match('-')) {
-      return -this.parseUnary()
-    }
-
+    if (this.match('+')) return this.parseUnary()
+    if (this.match('-')) return -this.parseUnary()
     return this.parsePrimary()
   }
 
   private parsePrimary(): number {
     const token = this.peek()
-
-    if (isNumberToken(token)) {
-      this.advance()
-      return Number(token)
-    }
-
-    if (isPiToken(token)) {
-      this.advance()
-      return Math.PI
-    }
-
+    if (isNumberToken(token)) { this.advance(); return Number(token) }
+    if (isPiToken(token)) { this.advance(); return Math.PI }
     if (isIdentifierToken(token)) {
       const name = (token ?? '').toLowerCase()
       this.advance()
-
       if (this.match('(')) {
         const args: number[] = []
         if (!this.match(')')) {
-          do {
-            args.push(this.parseSum())
-          } while (this.match(','))
-
+          do { args.push(this.parseSum()) } while (this.match(','))
           this.consume(')')
         }
-
-        if (name === 'x' && args.length === 1) {
-          return args[0]
-        }
-
+        if (name === 'x' && args.length === 1) return args[0]
         return this.evaluateFunction(name, args)
       }
-
-      if (name === 'x' || name === 't' || name === 'tau' || name === 'n' || name === 'k' || name === 'f' || name === 'omega') {
-        return this.scopeValue(name)
-      }
-
-      if (name === 'pi' || name === 'π') {
-        return Math.PI
-      }
-
-      if (name === 'e') {
-        return Math.E
-      }
-
+      if (name === 'pi' || name === 'π') return Math.PI
+      if (name === 'e') return Math.E
       return this.scopeValue(name)
     }
-
     if (this.match('(')) {
       const value = this.parseSum()
       this.consume(')')
       return value
     }
-
     throw new Error(`Unexpected token: ${token ?? 'end of input'}`)
   }
 
   private evaluateFunction(name: string, args: number[]): number {
     const fn = FORMULA_FUNCTIONS[name]
     if (!fn) {
-      if (args.length === 1) {
-        return args[0]
-      }
-
+      if (args.length === 1) return args[0]
       throw new Error(`Unknown function: ${name}`)
     }
-
     return fn(...args)
   }
 
@@ -544,438 +228,309 @@ class FormulaParser {
     if (name === 'x' || name === 't' || name === 'tau' || name === 'n' || name === 'k' || name === 'f' || name === 'omega') {
       return this.scope[name] ?? this.scope.x
     }
-
     return this.scope[name] ?? 0
   }
 
-  private readonly scope: Record<string, number> = {
-    x: 0,
-    t: 0,
-    tau: 0,
-    n: 0,
-    k: 0,
-    f: 0,
-    omega: 0,
-    a: 1,
-    b: 1,
-    phi: 0,
-    theta: 0,
-    delta: 0,
-    phi0: 0,
-    t0: 0,
-    a0: 1,
-    b0: 1,
-  }
-
   private match(expected: string): boolean {
-    if (this.peek() !== expected) {
-      return false
-    }
-
-    this.index += 1
-    return true
+    if (this.peek() !== expected) return false
+    this.index++; return true
   }
 
   private consume(expected: string): void {
-    if (!this.match(expected)) {
-      throw new Error(`Expected '${expected}' but found '${this.peek() ?? 'end of input'}'`)
-    }
+    if (!this.match(expected)) throw new Error(`Expected '${expected}' but found '${this.peek() ?? 'end of input'}'`)
   }
 
-  private peek(offset = 0): string | undefined {
-    return this.tokens[this.index + offset]
-  }
-
-  private previous(): string | undefined {
-    return this.tokens[this.index - 1]
-  }
-
-  private advance(): void {
-    this.index += 1
-  }
-
-  private isAtEnd(): boolean {
-    return this.index >= this.tokens.length
-  }
-
+  private peek(offset = 0): string | undefined { return this.tokens[this.index + offset] }
+  private previous(): string | undefined { return this.tokens[this.index - 1] }
+  private advance(): void { this.index++ }
+  private isAtEnd(): boolean { return this.index >= this.tokens.length }
   private isImplicitProductStart(token: string | undefined): boolean {
     return token === '(' || isNumberToken(token) || isIdentifierToken(token) || isPiToken(token)
   }
 }
 
-function toSignalNode(value: SignalNode | number): SignalNode {
-  if (typeof value === 'number') {
-    return { kind: 'constant', value }
-  }
-
-  return value
-}
-
 function compileFormula(expression: string): (x: number) => number {
   const cached = formulaCache.get(expression)
-  if (cached) {
-    return cached
-  }
-
+  if (cached) return cached
   const evaluator = (x: number) => {
     const parser = new FormulaParser(expression)
-    parser['scope'].x = x
-    parser['scope'].t = x
-    parser['scope'].tau = x
-    parser['scope'].n = x
-    parser['scope'].k = x
-    parser['scope'].f = x
-    parser['scope'].omega = x
+    parser.scope.x = x; parser.scope.t = x; parser.scope.tau = x
+    parser.scope.n = x; parser.scope.k = x; parser.scope.f = x; parser.scope.omega = x
     return parser.parse()
   }
-
   formulaCache.set(expression, evaluator)
   return evaluator
 }
 
-function looksStructuredExpression(expression: string): boolean {
-  return /^(sine|cosine|step|impulse|rect|triangle|delay|sum|product|conv|sgn|complexexp|periodicext|discreteexp|rectn|trin)\s*\(/i.test(expression)
-}
-
-function splitTopLevelConvolution(expression: string): [string, string] | null {
+// Estrae gli argomenti di una funzione dal raw string, rispettando la profondità
+// Esempio: "conv(rect(t), step(t))" → ["rect(t)", "step(t)"]
+function splitFunctionArgs(expr: string): string[] {
+  const openIdx = expr.indexOf('(')
+  if (openIdx === -1) return []
   let depth = 0
-
-  for (let index = 0; index < expression.length; index += 1) {
-    const character = expression[index]
-
-    if (character === '(' || character === '[') {
-      depth += 1
-      continue
-    }
-
-    if (character === ')' || character === ']') {
-      depth = Math.max(0, depth - 1)
-      continue
-    }
-
-    if (character === '*' && depth === 0) {
-      const left = expression.slice(0, index).trim()
-      const right = expression.slice(index + 1).trim()
-      if (left && right) {
-        return [left, right]
+  let start = openIdx + 1
+  const args: string[] = []
+  for (let i = openIdx; i < expr.length; i++) {
+    const c = expr[i]
+    if (c === '(' || c === '[') depth++
+    else if (c === ')' || c === ']') {
+      depth--
+      if (depth === 0) {
+        const arg = expr.slice(start, i).trim()
+        if (arg) args.push(arg)
+        break
       }
+    } else if (c === ',' && depth === 1) {
+      args.push(expr.slice(start, i).trim())
+      start = i + 1
     }
   }
+  return args
+}
 
+// Trova il primo '*' al livello 0 di profondità
+function splitTopLevelStar(expression: string): [string, string] | null {
+  let depth = 0
+  for (let i = 0; i < expression.length; i++) {
+    const c = expression[i]
+    if (c === '(' || c === '[') { depth++; continue }
+    if (c === ')' || c === ']') { depth = Math.max(0, depth - 1); continue }
+    if (c === '*' && depth === 0) {
+      const left = expression.slice(0, i).trim()
+      const right = expression.slice(i + 1).trim()
+      if (left && right) return [left, right]
+    }
+  }
   return null
 }
 
-function isNumberToken(token: string | undefined): boolean {
-  return typeof token === 'string' && (/^\d*\.\d+$/.test(token) || /^\d+$/.test(token))
+// Riconosce espressioni impulso scalate: [coeff*?]delta(t/n [+/- shift])
+// Esempi: "delta(t)", "delta(t-2)", "3*delta(t-1)", "2delta(n)", "-delta(t+1)"
+function tryParseAsScaledImpulse(expr: string): SignalNode | null {
+  const m = expr.match(
+    /^([+-]?\d*(?:\.\d+)?)\s*\*?\s*delta\s*\(\s*(?:tau|t|n)\s*(?:([+-])\s*(\d+(?:\.\d+)?))?\s*\)$/i
+  )
+  if (!m) return null
+  const coeffStr = m[1]
+  let amplitude: number
+  if (coeffStr === '' || coeffStr === '+') amplitude = 1
+  else if (coeffStr === '-') amplitude = -1
+  else { amplitude = parseFloat(coeffStr); if (isNaN(amplitude)) return null }
+  const shift = m[3] ? (m[2] === '-' ? parseFloat(m[3]) : -parseFloat(m[3])) : 0
+  return { kind: 'impulse', amplitude, shift }
 }
 
-function isIdentifierToken(token: string | undefined): boolean {
-  return typeof token === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(token)
-}
+// ─── Parser principale: formula-first ────────────────────────────────────────
 
-function asNumber(value: SignalNode | number): number {
-  if (typeof value === 'number') {
-    return value
-  }
-
-  if (value.kind === 'constant') {
-    return value.value
-  }
-
-  if (value.kind === 'sine' && value.frequency === 0 && value.phase === 0 && value.offset === 0) {
-    return value.amplitude
-  }
-
-  throw new Error('Expected a numeric parameter')
-}
-
-function asSignal(value: SignalNode | number): SignalNode {
-  if (typeof value === 'number') {
-    return { kind: 'constant', value }
-  }
-
-  return value
-}
-
-function buildNode(name: string, args: Array<SignalNode | number>): SignalNode {
-  switch (name) {
-    case 'sine':
-      return {
-        kind: 'sine',
-        amplitude: asNumber(args[0] ?? 1),
-        frequency: asNumber(args[1] ?? 1),
-        phase: asNumber(args[2] ?? 0),
-        offset: asNumber(args[3] ?? 0),
-      }
-    case 'cosine':
-      return {
-        kind: 'cosine',
-        amplitude: asNumber(args[0] ?? 1),
-        frequency: asNumber(args[1] ?? 1),
-        phase: asNumber(args[2] ?? 0),
-        offset: asNumber(args[3] ?? 0),
-      }
-    case 'step':
-      return {
-        kind: 'step',
-        height: asNumber(args[0] ?? 1),
-        shift: asNumber(args[1] ?? 0),
-      }
-    case 'impulse':
-      return {
-        kind: 'impulse',
-        amplitude: asNumber(args[0] ?? 1),
-        shift: asNumber(args[1] ?? 0),
-      }
-    case 'rect':
-      return {
-        kind: 'rect',
-        width: asNumber(args[0] ?? 2),
-        height: asNumber(args[1] ?? 1),
-        center: asNumber(args[2] ?? 0),
-      }
-    case 'triangle':
-      return {
-        kind: 'triangle',
-        width: asNumber(args[0] ?? 2),
-        height: asNumber(args[1] ?? 1),
-        center: asNumber(args[2] ?? 0),
-      }
-    case 'delay':
-      return {
-        kind: 'delay',
-        child: asSignal(args[0] ?? { kind: 'step', height: 1, shift: 0 }),
-        amount: asNumber(args[1] ?? 0),
-      }
-    case 'sum':
-      return {
-        kind: 'sum',
-        children: args.map(asSignal),
-      }
-    case 'product':
-      return {
-        kind: 'product',
-        children: args.map(asSignal),
-      }
-    case 'conv':
-      return {
-        kind: 'conv',
-        left: asSignal(args[0] ?? { kind: 'step', height: 1, shift: 0 }),
-        right: asSignal(args[1] ?? { kind: 'step', height: 1, shift: 0 }),
-      }
-    case 'sgn':
-      return { kind: 'sgn' }
-    case 'complexexp':
-      return {
-        kind: 'complexExp',
-        f0: asNumber(args[0] ?? 1),
-        phi: asNumber(args[1] ?? 0),
-      }
-    case 'periodicext':
-      return {
-        kind: 'periodicExt',
-        prototype: asSignal(args[0] ?? { kind: 'constant', value: 0 }),
-        period: asNumber(args[1] ?? 1),
-      }
-    case 'discreteexp':
-      return {
-        kind: 'discreteExp',
-        base: asNumber(args[0] ?? 0.5),
-      }
-    case 'rectn':
-      return {
-        kind: 'rectN',
-        N: Math.max(1, Math.round(asNumber(args[0] ?? 4))),
-      }
-    case 'trin':
-      return {
-        kind: 'triN',
-        N: Math.max(1, Math.round(asNumber(args[0] ?? 4))),
-      }
-    default:
-      throw new Error(`Unknown signal kind: ${name}`)
-  }
+export function normalizeSignalInput(expression: string): string {
+  return expression
+    .replace(/\\pi|π/g, 'π')
+    .replace(/\\tau|τ/g, 'tau')
+    .replace(/\\omega|ω/g, 'omega')
+    .replace(/\\delta|δ/g, 'delta')
+    .replace(/\\phi|φ/g, 'phi')
+    .replace(/\\theta|θ/g, 'theta')
+    .replace(/\[/g, '(')
+    .replace(/\]/g, ')')
 }
 
 export function parseSignalExpression(expression: string): ParseResult {
   try {
-    const normalizedExpression = normalizeSignalInput(expression.trim())
+    const expr = normalizeSignalInput(expression.trim())
 
-    if (looksStructuredExpression(normalizedExpression)) {
-      const parser = new Parser(normalizedExpression)
-      return { ok: true, signal: parser.parse() }
-    }
-
-    const convolutionParts = splitTopLevelConvolution(normalizedExpression)
-    if (convolutionParts) {
-      const [leftExpression, rightExpression] = convolutionParts
-      const left = parseSignalExpression(leftExpression)
-      const right = parseSignalExpression(rightExpression)
-
-      if (left.ok && right.ok && (left.signal.kind !== 'constant' || right.signal.kind !== 'constant')) {
-        return {
-          ok: true,
-          signal: {
-            kind: 'conv',
-            left: left.signal,
-            right: right.signal,
-          },
+    // 1. conv(a, b) esplicito
+    if (/^conv\s*\(/i.test(expr)) {
+      const args = splitFunctionArgs(expr)
+      if (args.length >= 2) {
+        const left = parseSignalExpression(args[0])
+        const right = parseSignalExpression(args[1])
+        if (left.ok && right.ok) {
+          return { ok: true, signal: { kind: 'conv', left: left.signal, right: right.signal } }
         }
       }
     }
 
-    compileFormula(normalizedExpression)(0)
-    return { ok: true, signal: { kind: 'formula', expression: normalizedExpression } }
-  } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : 'Unknown parser error',
+    // 2. Impulso scalato: [A*]delta(t[-t0])  →  nodo impulse per rendering freccia
+    const impulseNode = tryParseAsScaledImpulse(expr)
+    if (impulseNode) return { ok: true, signal: impulseNode }
+
+    // 3. a * b al livello 0 → convoluzione (o impulso scalato)
+    const starParts = splitTopLevelStar(expr)
+    if (starParts) {
+      const [leftExpr, rightExpr] = starParts
+      const left = parseSignalExpression(leftExpr)
+      const right = parseSignalExpression(rightExpr)
+      if (left.ok && right.ok) {
+        // costante * impulso → impulso scalato
+        if (left.signal.kind === 'constant' && right.signal.kind === 'impulse') {
+          return { ok: true, signal: { kind: 'impulse', amplitude: left.signal.value * right.signal.amplitude, shift: right.signal.shift } }
+        }
+        if (left.signal.kind === 'impulse' && right.signal.kind === 'constant') {
+          return { ok: true, signal: { kind: 'impulse', amplitude: left.signal.amplitude * right.signal.value, shift: left.signal.shift } }
+        }
+        // entrambi non-costanti → convoluzione
+        if (left.signal.kind !== 'constant' && right.signal.kind !== 'constant') {
+          return { ok: true, signal: { kind: 'conv', left: left.signal, right: right.signal } }
+        }
+        // costante * formula → ricade nel parser formula (moltiplicazione scalare)
+      }
     }
+
+    // 4. Espressione matematica generica (gestisce +, -, *, /, ^, funzioni, mul implicita)
+    compileFormula(expr)(0)
+    return { ok: true, signal: { kind: 'formula', expression: expr } }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Unknown parser error' }
   }
 }
+
+// ─── Descrive il segnale ──────────────────────────────────────────────────────
 
 export function describeSignal(node: SignalNode): string {
   switch (node.kind) {
-    case 'constant':
-      return `Constant ${node.value}`
-    case 'formula':
-      return `Formula ${node.expression}`
-    case 'sine':
-      return `Sine wave, A=${node.amplitude}, f=${node.frequency}`
-    case 'cosine':
-      return `Cosine wave, A=${node.amplitude}, f=${node.frequency}`
-    case 'step':
-      return `Unit step shifted at ${node.shift}`
-    case 'impulse':
-      return `Impulse centered at ${node.shift}`
-    case 'rect':
-      return `Rectangular pulse width ${node.width}`
-    case 'triangle':
-      return `Triangular pulse width ${node.width}`
-    case 'delay':
-      return `Delayed signal by ${node.amount}`
-    case 'sum':
-      return `Sum of ${node.children.length} signals`
-    case 'product':
-      return `Product of ${node.children.length} signals`
-    case 'conv':
-      return 'Convolution of two signals'
-    case 'sgn':
-      return 'Sign function sgn(t)'
-    case 'complexExp':
-      return `Complex exponential e^{j(2π·${node.f0}·t + ${node.phi})}`
-    case 'periodicExt':
-      return `Periodic extension, T=${node.period}`
-    case 'discreteExp':
-      return `Discrete exponential (${node.base})^n`
-    case 'rectN':
-      return `Discrete rectangle rect_${node.N}[n]`
-    case 'triN':
-      return `Discrete triangle tri_${node.N}[n]`
+    case 'constant': return `Constant ${node.value}`
+    case 'formula': return `Formula ${node.expression}`
+    case 'sine': return `Sine wave, A=${node.amplitude}, f=${node.frequency}`
+    case 'cosine': return `Cosine wave, A=${node.amplitude}, f=${node.frequency}`
+    case 'step': return `Unit step shifted at ${node.shift}`
+    case 'impulse': return `Impulse centered at ${node.shift}`
+    case 'rect': return `Rectangular pulse width ${node.width}`
+    case 'triangle': return `Triangular pulse width ${node.width}`
+    case 'delay': return `Delayed signal by ${node.amount}`
+    case 'sum': return `Sum of ${node.children.length} signals`
+    case 'product': return `Product of ${node.children.length} signals`
+    case 'conv': return 'Convolution of two signals'
+    case 'sgn': return 'Sign function sgn(t)'
+    case 'complexExp': return `Complex exponential e^{j(2π·${node.f0}·t + ${node.phi})}`
+    case 'periodicExt': return `Periodic extension, T=${node.period}`
+    case 'discreteExp': return `Discrete exponential (${node.base})^n`
+    case 'rectN': return `Discrete rectangle rect_${node.N}[n]`
+    case 'triN': return `Discrete triangle tri_${node.N}[n]`
   }
 }
 
+// ─── Formattazione leggibile (variabili fisse: t per CT, n per DT) ────────────
+
+export function formatFormula(node: SignalNode): string {
+  const v = 't'
+  const d = 'n'
+  switch (node.kind) {
+    case 'constant': return `x = ${node.value}`
+    case 'formula': return `x(${v}) = ${node.expression}`
+    case 'sine': return `x(${v}) = ${node.amplitude} sin(2π·${node.frequency}·${v} + ${node.phase})`
+    case 'cosine': return `x(${v}) = ${node.amplitude} cos(2π·${node.frequency}·${v} + ${node.phase})`
+    case 'step': return `x(${v}) = ${node.height} ε(${v} − ${node.shift})`
+    case 'impulse': return `x(${v}) = ${node.amplitude} δ(${v} − ${node.shift})`
+    case 'rect': return `x(${v}) = rect((${v}−${node.center})/${node.width})`
+    case 'triangle': return `x(${v}) = tri((${v}−${node.center})/${node.width})`
+    case 'delay': return `x(${v}) = x(${v} − ${node.amount})`
+    case 'sum': return `x(${v}) = Σ xᵢ(${v})`
+    case 'product': return `x(${v}) = Π xᵢ(${v})`
+    case 'conv': return `y(${v}) = x(${v}) ∗ h(${v})`
+    case 'sgn': return `x(${v}) = sgn(${v})`
+    case 'complexExp': return `x(${v}) = e^{j(2π·${node.f0}·${v}+${node.phi})}`
+    case 'periodicExt': return `x(${v}) = Σ_k p(${v}−k·${node.period})`
+    case 'discreteExp': return `x[${d}] = (${node.base})^${d}`
+    case 'rectN': return `x[${d}] = rect_{${node.N}}[${d}]`
+    case 'triN': return `x[${d}] = tri_{${node.N}}[${d}]`
+    default: return `x(${v})`
+  }
+}
+
+// ─── Valutazione ──────────────────────────────────────────────────────────────
+
 export function evaluateSignal(node: SignalNode, x: number): number {
   switch (node.kind) {
-    case 'constant':
-      return node.value
-    case 'formula':
-      return compileFormula(node.expression)(x)
-    case 'sine':
-      return node.amplitude * Math.sin(2 * Math.PI * node.frequency * x + node.phase) + node.offset
-    case 'cosine':
-      return node.amplitude * Math.cos(2 * Math.PI * node.frequency * x + node.phase) + node.offset
+    case 'constant': return node.value
+    case 'formula': return compileFormula(node.expression)(x)
+    case 'sine': return node.amplitude * Math.sin(2 * Math.PI * node.frequency * x + node.phase) + node.offset
+    case 'cosine': return node.amplitude * Math.cos(2 * Math.PI * node.frequency * x + node.phase) + node.offset
     case 'step': {
-      // ε(t): 1 per t > shift, 1/2 per t = shift (def. corso Dalai), 0 per t < shift
       const d = x - node.shift
       if (Math.abs(d) < 1e-10) return node.height * 0.5
       return d > 0 ? node.height : 0
     }
     case 'impulse':
-      return Math.abs(x - node.shift) < 1e-3 ? node.amplitude : 0
+      // threshold 0.025 ≈ metà passo tipico (0.02) → almeno 1 campione lo cattura
+      return Math.abs(x - node.shift) < 0.025 ? node.amplitude : 0
     case 'rect': {
-      // rect(t): 1 per |t-c|<w/2, 1/2 per |t-c|=w/2, 0 altrimenti (def. corso Dalai)
       const dist = Math.abs(x - node.center)
       const half = node.width / 2
       if (Math.abs(dist - half) < 1e-10) return node.height * 0.5
       return dist < half ? node.height : 0
     }
     case 'triangle': {
-      // tri(t): 1 - |t-c|/(w/2) per |t-c| ≤ w/2, 0 altrimenti
       const distance = Math.abs(x - node.center)
-      if (distance > node.width / 2) {
-        return 0
-      }
-      const factor = 1 - distance / (node.width / 2)
-      return node.height * factor
+      if (distance > node.width / 2) return 0
+      return node.height * (1 - distance / (node.width / 2))
     }
-    case 'delay':
-      return evaluateSignal(node.child, x - node.amount)
-    case 'sum':
-      return node.children.reduce((total, child) => total + evaluateSignal(child, x), 0)
-    case 'product':
-      return node.children.reduce((total, child, index) => (index === 0 ? evaluateSignal(child, x) : total * evaluateSignal(child, x)), 1)
-    case 'conv':
-      return approximateConvolution(node.left, node.right, x)
-    // --- Segnali aggiuntivi del corso ---
-    case 'sgn':
-      // sgn(t) = 2ε(t) - 1: +1 per t>0, 0 per t=0, -1 per t<0
-      if (Math.abs(x) < 1e-10) return 0
-      return x > 0 ? 1 : -1
-    case 'complexExp':
-      // Parte reale di e^{j(2πf₀t+φ)} = cos(2πf₀t+φ)
-      return Math.cos(2 * Math.PI * node.f0 * x + node.phi)
+    case 'delay': return evaluateSignal(node.child, x - node.amount)
+    case 'sum': return node.children.reduce((total, child) => total + evaluateSignal(child, x), 0)
+    case 'product': return node.children.reduce((total, child, i) => i === 0 ? evaluateSignal(child, x) : total * evaluateSignal(child, x), 1)
+    case 'conv': return approximateConvolution(node.left, node.right, x)
+    case 'sgn': return Math.abs(x) < 1e-10 ? 0 : x > 0 ? 1 : -1
+    case 'complexExp': return Math.cos(2 * Math.PI * node.f0 * x + node.phi)
     case 'periodicExt': {
-      // Riduce t al range fondamentale [0, T) e valuta il prototipo
       const T = node.period
       if (T <= 0) return 0
-      let tMod = ((x % T) + T) % T
+      const tMod = ((x % T) + T) % T
       return evaluateSignal(node.prototype, tMod)
     }
-    case 'discreteExp':
-      // a^n — diverge per |a|>1, utile moltiplicato per ε[n]
-      return Math.pow(node.base, Math.round(x))
-    case 'rectN': {
-      // rect_N[n] = 1 per 0 ≤ n < N, 0 altrimenti
-      const n = Math.round(x)
-      return n >= 0 && n < node.N ? 1 : 0
-    }
-    case 'triN': {
-      // tri_N[n] = 1 - |n/N| per |n| ≤ N, 0 altrimenti
-      const n = Math.round(x)
-      if (Math.abs(n) > node.N) return 0
-      return 1 - Math.abs(n) / node.N
-    }
+    case 'discreteExp': return Math.pow(node.base, Math.round(x))
+    case 'rectN': { const n = Math.round(x); return n >= 0 && n < node.N ? 1 : 0 }
+    case 'triN': { const n = Math.round(x); if (Math.abs(n) > node.N) return 0; return 1 - Math.abs(n) / node.N }
   }
 }
 
 function approximateConvolution(left: SignalNode, right: SignalNode, x: number): number {
+  // Proprietà dello sifting: conv(A·δ(t-t₀), g)(x) = A·g(x-t₀)
+  if (left.kind === 'impulse') return left.amplitude * evaluateSignal(right, x - left.shift)
+  if (right.kind === 'impulse') return right.amplitude * evaluateSignal(left, x - right.shift)
+
   const step = 0.05
   const limit = 6
   let total = 0
-
   for (let tau = -limit; tau <= limit; tau += step) {
     total += evaluateSignal(left, tau) * evaluateSignal(right, x - tau) * step
   }
-
   return total
 }
+
+// ─── Estrae posizioni degli impulsi per il rendering freccia ─────────────────
+
+export function extractImpulseMarkers(node: SignalNode): ImpulseMarker[] {
+  switch (node.kind) {
+    case 'impulse':
+      return [{ position: node.shift, amplitude: node.amplitude }]
+    case 'sum':
+      return node.children.flatMap(extractImpulseMarkers)
+    case 'delay':
+      return extractImpulseMarkers(node.child).map(m => ({
+        position: m.position + node.amount,
+        amplitude: m.amplitude,
+      }))
+    default:
+      return []
+  }
+}
+
+// ─── Campionamento ────────────────────────────────────────────────────────────
 
 export function sampleSignal(node: SignalNode, start: number, end: number, points: number): SignalSample[] {
   const samples: SignalSample[] = []
   const step = (end - start) / Math.max(points - 1, 1)
-
-  for (let index = 0; index < points; index += 1) {
-    const x = start + index * step
+  for (let i = 0; i < points; i++) {
+    const x = start + i * step
     samples.push({ x, y: evaluateSignal(node, x) })
   }
-
   return samples
 }
 
+// ─── Statistiche ─────────────────────────────────────────────────────────────
+
 export function estimateSignalStats(node: SignalNode, samples: SignalSample[]): SignalStats {
-  const values = samples.map((sample) => sample.y)
-  const peak = Math.max(...values.map((value) => Math.abs(value)), 0)
+  const values = samples.map(s => s.y)
+  const peak = Math.max(...values.map(v => Math.abs(v)), 0)
   const min = Math.min(...values, 0)
   const max = Math.max(...values, 0)
   const energy = samples.reduce((total, sample, index, array) => {
@@ -988,121 +543,66 @@ export function estimateSignalStats(node: SignalNode, samples: SignalSample[]): 
   const estimatedPeriod = detectPeriod(node)
   const estimatedFrequency = estimatedPeriod ? 1 / estimatedPeriod : null
   const classification = energy > 0 && averagePower < 10 ? 'energy' : energy > 0 ? 'power' : 'finite-window'
-
-  return {
-    peak,
-    min,
-    max,
-    energy,
-    averagePower,
-    zeroCrossings,
-    estimatedPeriod,
-    estimatedFrequency,
-    classification,
-  }
+  return { peak, min, max, energy, averagePower, zeroCrossings, estimatedPeriod, estimatedFrequency, classification }
 }
 
-export function formatFormula(node: SignalNode, notation: NotationSettings): string {
-  const variable = notation.timeVariable
-  const discrete = notation.discreteVariable
-  const frequency = notation.frequencyVariable
+// ─── Rilevamento periodo ──────────────────────────────────────────────────────
 
-  switch (node.kind) {
-    case 'constant':
-      return `x = ${node.value}`
-    case 'formula':
-      return `x(${variable}) = ${node.expression}`
-    case 'sine':
-      return `x(${variable}) = ${node.amplitude} sin(2π ${frequency} ${variable} + ${node.phase}) + ${node.offset}`
-    case 'cosine':
-      return `x(${variable}) = ${node.amplitude} cos(2π ${frequency} ${variable} + ${node.phase}) + ${node.offset}`
-    case 'step':
-      return `x(${variable}) = ${node.height} u(${variable} - ${node.shift})`
-    case 'impulse':
-      return `x(${variable}) = ${node.amplitude} δ(${variable} - ${node.shift})`
-    case 'rect':
-      return `x(${variable}) = rect(${variable} - ${node.center}, width=${node.width})`
-    case 'triangle':
-      return `x(${variable}) = tri(${variable} - ${node.center}, width=${node.width})`
-    case 'delay':
-      return `x(${variable}) = x(${variable} - ${node.amount})`
-    case 'sum':
-      return `x(${variable}) = Σ x_i(${variable})`
-    case 'product':
-      return `x(${variable}) = Π x_i(${variable})`
-    case 'conv':
-      return `y(${variable}) = x(${variable}) * h(${variable})`
-    case 'sgn':
-      return `x(${variable}) = sgn(${variable})`
-    case 'complexExp':
-      return `x(${variable}) = e^{j(2π·${node.f0}·${variable} + ${node.phi})}`
-    case 'periodicExt':
-      return `x(${variable}) = Σ_k p(${variable} - k·${node.period})`
-    case 'discreteExp':
-      return `x[${discrete}] = (${node.base})^${discrete}`
-    case 'rectN':
-      return `x[${discrete}] = rect_{${node.N}}[${discrete}]`
-    case 'triN':
-      return `x[${discrete}] = tri_{${node.N}}[${discrete}]`
-    default:
-      return `x(${discrete})`
-  }
-}
-
-function detectPeriod(node: SignalNode): number | null {
+export function detectPeriod(node: SignalNode): number | null {
   if (node.kind === 'sine' || node.kind === 'cosine') {
-    if (node.frequency === 0) {
-      return null
-    }
+    if (node.frequency === 0) return null
     return 1 / Math.abs(node.frequency)
   }
-
-  if (node.kind === 'sum') {
-    const periods = node.children.map(detectPeriod).filter((value): value is number => Boolean(value))
-    if (periods.length === 0) {
-      return null
-    }
-    return periods.reduce((left, right) => lcm(left, right))
+  if (node.kind === 'complexExp') {
+    if (node.f0 === 0) return null
+    return 1 / Math.abs(node.f0)
   }
-
+  if (node.kind === 'periodicExt') return node.period
+  if (node.kind === 'sum') {
+    const periods = node.children.map(detectPeriod).filter((v): v is number => v !== null)
+    if (periods.length === 0) return null
+    return periods.reduce((a, b) => lcm(a, b))
+  }
+  if (node.kind === 'formula') {
+    // Cerca pattern periodici comuni: sin/cos(2*π*[f0*]t) → T = 1/f0
+    const m = node.expression.match(
+      /(?:sin|cos)\s*\(\s*2\s*\*?\s*(?:π|pi)\s*\*?\s*(\d*\.?\d*)\s*\*?\s*[tn]/i
+    )
+    if (m) {
+      const f0 = m[1] && m[1] !== '' ? parseFloat(m[1]) : 1
+      if (!isNaN(f0) && f0 > 0) return 1 / f0
+    }
+    return null
+  }
   return null
 }
 
-function lcm(left: number, right: number): number {
-  return Math.abs(left * right) / gcd(left, right)
+function lcm(a: number, b: number): number {
+  return Math.abs(a * b) / gcd(a, b)
 }
 
-function gcd(left: number, right: number): number {
-  let a = Math.abs(left)
-  let b = Math.abs(right)
-
-  while (b !== 0) {
-    const temp = b
-    b = a % b
-    a = temp
-  }
-
-  return a || 1
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a), y = Math.abs(b)
+  while (y !== 0) { const t = y; y = x % y; x = t }
+  return x || 1
 }
 
 function countZeroCrossings(values: number[]): number {
   let crossings = 0
-  for (let index = 1; index < values.length; index += 1) {
-    if (values[index - 1] === 0 || values[index] === 0) {
-      continue
-    }
-    if ((values[index - 1] > 0 && values[index] < 0) || (values[index - 1] < 0 && values[index] > 0)) {
-      crossings += 1
-    }
+  for (let i = 1; i < values.length; i++) {
+    if (values[i - 1] === 0 || values[i] === 0) continue
+    if ((values[i - 1] > 0 && values[i] < 0) || (values[i - 1] < 0 && values[i] > 0)) crossings++
   }
   return crossings
 }
 
+// ─── Esempi rapidi ────────────────────────────────────────────────────────────
+
 export function makeExampleSignals(): Array<{ label: string; expression: string }> {
   return [
-    { label: 'Sinusoid', expression: 'sine(1,1,0,0)' },
-    { label: 'Step + sine', expression: 'step(1,0) + sine(0.5,2,0,0)' },
-    { label: 'Pulse train', expression: 'rect(2,1,0) + rect(2,0.5,4)' },
-    { label: 'Delayed pulse', expression: 'delay(rect(2,1,0),2)' },
+    { label: 'sin(2πt)', expression: 'sin(2*π*t)' },
+    { label: 'rect(t)', expression: 'rect(t)' },
+    { label: 'ε(t)', expression: 'step(t)' },
+    { label: 'δ[n]', expression: 'delta(n)' },
   ]
 }
