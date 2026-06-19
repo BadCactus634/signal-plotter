@@ -17,6 +17,7 @@ export type SignalKind =
   | 'discreteExp'
   | 'rectN'
   | 'triN'
+  | 'sampled'
 
 export type SignalNode =
   | { kind: 'constant'; value: number }
@@ -37,6 +38,7 @@ export type SignalNode =
   | { kind: 'discreteExp'; base: number }
   | { kind: 'rectN'; N: number }
   | { kind: 'triN'; N: number }
+  | { kind: 'sampled'; source: SignalNode; fc: number }
 
 export type ParseResult =
   | { ok: true; signal: SignalNode }
@@ -217,14 +219,19 @@ class FormulaParser {
 
   private evaluateFunction(name: string, args: number[]): number {
     const fn = FORMULA_FUNCTIONS[name]
-    if (!fn) {
-      if (args.length === 1) return args[0]
-      throw new Error(`Unknown function: ${name}`)
-    }
+    if (!fn) throw new Error(`Funzione sconosciuta: '${name}'`)
     return fn(...args)
   }
 
+  private static readonly KNOWN_VARS = new Set([
+    'x', 't', 'tau', 'n', 'k', 'f', 'omega',
+    'a', 'b', 'phi', 'theta', 'phi0', 't0', 'a0', 'b0',
+  ])
+
   private scopeValue(name: string): number {
+    if (!FormulaParser.KNOWN_VARS.has(name)) {
+      throw new Error(`Identificatore sconosciuto: '${name}'`)
+    }
     if (name === 'x' || name === 't' || name === 'tau' || name === 'n' || name === 'k' || name === 'f' || name === 'omega') {
       return this.scope[name] ?? this.scope.x
     }
@@ -368,6 +375,13 @@ export function parseSignalExpression(expression: string): ParseResult {
         if (left.signal.kind === 'impulse' && right.signal.kind === 'constant') {
           return { ok: true, signal: { kind: 'impulse', amplitude: left.signal.amplitude * right.signal.value, shift: left.signal.shift } }
         }
+        // costante * rectN → prodotto scalato
+        if (left.signal.kind === 'constant' && right.signal.kind === 'rectN') {
+          return { ok: true, signal: { kind: 'product', children: [left.signal, right.signal] } }
+        }
+        if (left.signal.kind === 'rectN' && right.signal.kind === 'constant') {
+          return { ok: true, signal: { kind: 'product', children: [left.signal, right.signal] } }
+        }
         // entrambi non-costanti → convoluzione
         if (left.signal.kind !== 'constant' && right.signal.kind !== 'constant') {
           return { ok: true, signal: { kind: 'conv', left: left.signal, right: right.signal } }
@@ -376,7 +390,14 @@ export function parseSignalExpression(expression: string): ParseResult {
       }
     }
 
-    // 4. Espressione matematica generica (gestisce +, -, *, /, ^, funzioni, mul implicita)
+    // 4. rect_N(N) — finestra rettangolare discreta
+    const rectNMatch = expr.replace(/\s/g, '').toLowerCase().match(/^rect[_]?n\((\d+)\)$/)
+    if (rectNMatch) {
+      const N = parseInt(rectNMatch[1], 10)
+      if (N > 0) return { ok: true, signal: { kind: 'rectN', N } }
+    }
+
+    // 5. Espressione matematica generica (gestisce +, -, *, /, ^, funzioni, mul implicita)
     compileFormula(expr)(0)
     return { ok: true, signal: { kind: 'formula', expression: expr } }
   } catch (error) {
@@ -479,6 +500,7 @@ export function evaluateSignal(node: SignalNode, x: number): number {
     case 'discreteExp': return Math.pow(node.base, Math.round(x))
     case 'rectN': { const n = Math.round(x); return n >= 0 && n < node.N ? 1 : 0 }
     case 'triN': { const n = Math.round(x); if (Math.abs(n) > node.N) return 0; return 1 - Math.abs(n) / node.N }
+    case 'sampled': return evaluateSignal(node.source, x / node.fc)
   }
 }
 
@@ -564,15 +586,30 @@ export function detectPeriod(node: SignalNode): number | null {
     return periods.reduce((a, b) => lcm(a, b))
   }
   if (node.kind === 'formula') {
-    // Cerca pattern periodici comuni: sin/cos(2*π*[f0*]t) → T = 1/f0
-    const m = node.expression.match(
-      /(?:sin|cos)\s*\(\s*2\s*\*?\s*(?:π|pi)\s*\*?\s*(\d*\.?\d*)\s*\*?\s*[tn]/i
-    )
-    if (m) {
-      const f0 = m[1] && m[1] !== '' ? parseFloat(m[1]) : 1
-      if (!isNaN(f0) && f0 > 0) return 1 / f0
+    // Cerca tutti i pattern sin/cos(A*π*B*t) nell'espressione → T = 2/(A·B)
+    // Handles: sin(2πt), sin(4πt), sin(πt), sin(2π*3*t), sgn(sin(2πt)), etc.
+    const regex = /(?:sin|cos)\s*\(\s*(\d+\.?\d*|\d*\.?\d+)?\s*\*?\s*(?:π|pi)\s*\*?\s*(\d+\.?\d*|\d*\.?\d+)?\s*\*?\s*[tn]/gi
+    const periods: number[] = []
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(node.expression)) !== null) {
+      const a = m[1] ? parseFloat(m[1]) : 1
+      const b = m[2] ? parseFloat(m[2]) : 1
+      const omegaOverPi = Math.abs(a * b)
+      if (omegaOverPi > 0) {
+        const T = 2 / omegaOverPi
+        if (isFinite(T) && T > 0 && T < 1000) periods.push(T)
+      }
     }
-    return null
+    if (periods.length === 0) return null
+    if (periods.length === 1) return periods[0]
+    return periods.reduce((a, b) => lcmApprox(a, b))
+  }
+  if (node.kind === 'sampled') {
+    const T = detectPeriod(node.source)
+    if (T === null) return null
+    const N = T * node.fc
+    const rounded = Math.round(N)
+    return Math.abs(N - rounded) < 1e-6 && rounded >= 1 ? rounded : null
   }
   return null
 }
@@ -585,6 +622,14 @@ function gcd(a: number, b: number): number {
   let x = Math.abs(a), y = Math.abs(b)
   while (y !== 0) { const t = y; y = x % y; x = t }
   return x || 1
+}
+
+function lcmApprox(a: number, b: number): number {
+  const scale = 10000
+  const ai = Math.round(a * scale)
+  const bi = Math.round(b * scale)
+  if (ai === 0 || bi === 0) return Math.max(a, b)
+  return lcm(ai, bi) / scale
 }
 
 function countZeroCrossings(values: number[]): number {

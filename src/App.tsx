@@ -1,12 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ExpressionTextarea } from './components/ExpressionTextarea'
+import { ExpressionTextarea, type ExpressionTextareaHandle } from './components/ExpressionTextarea'
 import { SignalInfoCard } from './components/SignalInfoCard'
-import { SignalPlot } from './components/SignalPlot'
+import { SignalPlot, type DFTWindowMarker } from './components/SignalPlot'
 import { SpectrumPlot } from './components/SpectrumPlot'
 import {
   detectPeriod,
   estimateSignalStats,
+  evaluateSignal,
   makeExampleSignals,
   normalizeSignalInput,
   parseSignalExpression,
@@ -23,8 +24,9 @@ import { computeDTFT } from './domain/fourier/dtAperiodic'
 import { computeDTPeriodic } from './domain/fourier/dtPeriodic'
 import { computeDFT } from './domain/fourier/dtDFT'
 import { computeGibbsReconstruction } from './domain/gibbs'
-import { computeAliasingOverlay, type AliasingOverlay } from './domain/sampling'
+import { computeAliasingOverlay, estimateBandwidth, type AliasingOverlay } from './domain/sampling'
 import { useStoredState } from './lib/persistence'
+import { SamplingModal, type SourceSignalInfo } from './components/SamplingModal'
 import './App.css'
 
 // ─── Tipi ────────────────────────────────────────────────────────────────────
@@ -46,7 +48,8 @@ type StudySettings = {
   showLegend: boolean
   showTooltip: boolean
   showPhase: boolean
-  samplingRate: number
+  showSpectrumEnvelope: boolean
+  samplingRate: number  // kept for localStorage compat, not shown in UI
 }
 
 type StudyState = {
@@ -90,22 +93,44 @@ const ANALYSIS_MODE_LABELS: Record<AnalysisMode, string> = {
   DT_DFT: 'DFT N-point',
 }
 
-const QUICK_EXAMPLES: Array<{
-  label: string; expression: string; mode: ViewMode
-  analysisMode: AnalysisMode; params?: AnalysisParams
-}> = [
-  { label: 'rect(t)',    expression: 'rect(t)',           mode: 'time',     analysisMode: 'CT_aperiodic' },
-  { label: 'tri(t)',     expression: 'tri(t)',            mode: 'time',     analysisMode: 'CT_aperiodic' },
-  { label: 'sinc(t)',    expression: 'sinc(t)',           mode: 'time',     analysisMode: 'CT_aperiodic' },
-  { label: 'ε(t)',       expression: 'step(t)',           mode: 'time',     analysisMode: 'CT_aperiodic' },
-  { label: 'sgn(t)',     expression: 'sgn(t)',            mode: 'time',     analysisMode: 'CT_aperiodic' },
-  { label: 'onda sq.',   expression: 'sgn(sin(2πt))',    mode: 'time',     analysisMode: 'CT_periodic',  params: { period: 1, kMax: 15 } },
-  { label: 'sin(2πt)',   expression: 'sin(2πt)',          mode: 'time',     analysisMode: 'CT_periodic',  params: { period: 1 } },
-  { label: 'δ(t)',       expression: 'delta(t)',          mode: 'time',     analysisMode: 'CT_aperiodic' },
-  { label: 'δ[n]',       expression: 'delta(n)',          mode: 'discrete', analysisMode: 'DT_aperiodic' },
-  { label: 'ε[n]',       expression: 'step(n)',           mode: 'discrete', analysisMode: 'DT_aperiodic' },
-  { label: '0.8ⁿε[n]',  expression: '0.8^n step(n)',     mode: 'discrete', analysisMode: 'DT_aperiodic' },
-]
+// Static sinc for settings tab preview
+const SETTINGS_PREVIEW_RESULT = parseSignalExpression('sinc(t)')
+const SETTINGS_PREVIEW_SIGNALS: PlotSignal[] = SETTINGS_PREVIEW_RESULT.ok
+  ? [{ id: 'settings-sinc', label: 'sinc(t)', node: SETTINGS_PREVIEW_RESULT.signal, color: '#22d3ee' }]
+  : []
+
+// ─── Variable substitution ────────────────────────────────────────────────────
+
+function swapVariable(expr: string, from: 't' | 'n', to: 't' | 'n'): string {
+  return expr.replace(new RegExp(`(?<![a-zA-Z_0-9])${from}(?![a-zA-Z_0-9])`, 'g'), to)
+}
+
+// ─── Dynamic quick examples ───────────────────────────────────────────────────
+
+type QuickExDef = { label: string; expression: string; mode: ViewMode; analysisMode: AnalysisMode; params?: AnalysisParams }
+
+function getQuickExamples(mode: ViewMode): QuickExDef[] {
+  const v = mode === 'discrete' ? 'n' : 't'
+  const isDisc = mode === 'discrete'
+  const base: QuickExDef[] = [
+    { label: `sin(2π${v})`, expression: `sin(2π${v})`, mode, analysisMode: isDisc ? 'DT_aperiodic' : 'CT_periodic', params: isDisc ? undefined : { period: 1 } },
+    { label: `cos(2π${v})`, expression: `cos(2π${v})`, mode, analysisMode: isDisc ? 'DT_aperiodic' : 'CT_periodic', params: isDisc ? undefined : { period: 1 } },
+    { label: `rect(${v})`,  expression: `rect(${v})`,  mode, analysisMode: isDisc ? 'DT_aperiodic' : 'CT_aperiodic' },
+    { label: `ε(${v})`,     expression: `step(${v})`,  mode, analysisMode: isDisc ? 'DT_aperiodic' : 'CT_aperiodic' },
+    { label: `δ(${v})`,     expression: `delta(${v})`, mode, analysisMode: isDisc ? 'DT_aperiodic' : 'CT_aperiodic' },
+  ]
+  const ctOnly: QuickExDef[] = !isDisc ? [
+    { label: 'tri(t)',    expression: 'tri(t)',            mode: 'time', analysisMode: 'CT_aperiodic' },
+    { label: 'sinc(t)',   expression: 'sinc(t)',           mode: 'time', analysisMode: 'CT_aperiodic' },
+    { label: 'sgn(t)',    expression: 'sgn(t)',            mode: 'time', analysisMode: 'CT_aperiodic' },
+    { label: 'onda sq.',  expression: 'sgn(sin(2πt))',    mode: 'time', analysisMode: 'CT_periodic', params: { period: 1, kMax: 15 } },
+  ] : []
+  const dtOnly: QuickExDef[] = isDisc ? [
+    { label: '0.8ⁿε[n]', expression: '0.8^n step(n)', mode: 'discrete', analysisMode: 'DT_aperiodic' },
+    { label: 'rect₈[n]',  expression: 'rect_N(8)',     mode: 'discrete', analysisMode: 'DT_aperiodic' },
+  ] : []
+  return [...base, ...ctOnly, ...dtOnly]
+}
 
 // ─── Componente principale ───────────────────────────────────────────────────
 
@@ -114,24 +139,40 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(true)
   const [editingSignalId, setEditingSignalId] = useState<string | null>(null)
   const [signalDraft, setSignalDraft] = useState<SignalDraft>(createEmptyDraft())
+  const [samplingOpen, setSamplingOpen] = useState(false)
+  const exprRef = useRef<ExpressionTextareaHandle>(null)
 
   const renderedSignals = useMemo<RenderedSignal[]>(
     () => studyState.signals.map((signal, index) => ({
       ...signal,
-      stats: computeStats(signal.node, signal.mode, studyState.settings.samplingRate),
+      stats: computeStats(signal.node, signal.mode),
       color: PALETTE[index % PALETTE.length],
     })),
-    [studyState.settings.samplingRate, studyState.signals],
+    [studyState.signals],
   )
 
   const isFrequencyTab = studyState.activeTab === 'frequency'
+  const isSettingsTab = studyState.activeTab === 'settings'
   const chartMode: ViewMode = studyState.activeTab === 'discrete' ? 'discrete' : 'time'
 
   const chartSignals = renderedSignals.filter(s => s.visible && s.mode === chartMode)
   const allVisibleSignals = renderedSignals.filter(s => s.visible)
 
+  const chartYRange = useMemo(() => {
+    if (isFrequencyTab || isSettingsTab) return null
+    const allModeSignals = renderedSignals.filter(s => s.mode === chartMode && s.visible)
+    if (allModeSignals.length === 0) return null
+    let yMin = -0.5, yMax = 0.5
+    for (const sig of allModeSignals) {
+      yMin = Math.min(yMin, sig.stats.min)
+      yMax = Math.max(yMax, sig.stats.max)
+    }
+    const pad = (yMax - yMin) * 0.08
+    return { min: yMin - pad, max: yMax + pad }
+  }, [renderedSignals, chartMode, isFrequencyTab, isSettingsTab])
+
   const gibbsOverlay = useMemo<SignalSample[]>(() => {
-    if (isFrequencyTab) return []
+    if (isFrequencyTab || isSettingsTab) return []
     const editSig = editingSignalId ? renderedSignals.find(s => s.id === editingSignalId) : null
     const gibbsSig = editSig ?? renderedSignals.find(s =>
       s.analysisMode === 'CT_periodic' && s.analysisParams.gibbsEnabled && s.visible
@@ -142,27 +183,62 @@ function App() {
     try {
       return computeGibbsReconstruction(gibbsSig.node, period, gibbsHarmonics ?? 5).samples
     } catch { return [] }
-  }, [isFrequencyTab, editingSignalId, renderedSignals])
+  }, [isFrequencyTab, isSettingsTab, editingSignalId, renderedSignals])
 
-  const spectralEntries = useMemo(() => {
+  const spectrumZoomKey = studyState.signals.map(s => s.id).join(',')
+
+  const dftWindows = useMemo<DFTWindowMarker[]>(() => {
+    if (isFrequencyTab || isSettingsTab || chartMode !== 'discrete') return []
+    return chartSignals
+      .filter(s => s.analysisMode === 'DT_DFT')
+      .map(s => ({
+        signalId: s.id,
+        N: s.analysisParams.dftN ?? 64,
+        startN: 0,
+        node: s.node,
+        color: s.color,
+      }))
+  }, [isFrequencyTab, isSettingsTab, chartMode, chartSignals])
+
+  const allSpectralEntries = useMemo(() => {
     if (!isFrequencyTab) return []
-    return allVisibleSignals.flatMap(sig => {
+    return renderedSignals.flatMap(sig => {
       try {
         const spectrum = computeSpectrum(sig.node, sig.analysisMode, sig.analysisParams)
         if (!spectrum) return []
-        let aliasing: AliasingOverlay | undefined
-        if (sig.analysisMode === 'CT_aperiodic' && sig.analysisParams.samplingFc && spectrum.kind === 'continuous') {
-          aliasing = computeAliasingOverlay(spectrum, sig.analysisParams.samplingFc)
-        }
-        return [{ id: sig.id, label: sig.label, color: sig.color, spectrum, aliasing }]
+        return [{ id: sig.id, label: sig.label, color: sig.color, spectrum, aliasing: undefined as AliasingOverlay | undefined, dtAliasingWarning: undefined as string | undefined, nodeKind: sig.node.kind, analysisMode: sig.analysisMode }]
       } catch { return [] }
     })
-  }, [isFrequencyTab, allVisibleSignals])
+  }, [isFrequencyTab, renderedSignals])
 
-  const freqLabel = spectralEntries.some(e => {
-    const sig = allVisibleSignals.find(s => s.id === e.id)
-    return sig && (sig.analysisMode === 'DT_aperiodic' || sig.analysisMode === 'DT_periodic' || sig.analysisMode === 'DT_DFT')
-  }) ? 'f (normalizzata)' : 'f [Hz]'
+  const spectralEntries = useMemo(() => {
+    return allSpectralEntries
+      .filter(e => allVisibleSignals.some(s => s.id === e.id))
+      .map(e => {
+        const sig = allVisibleSignals.find(s => s.id === e.id)!
+        let aliasing: AliasingOverlay | undefined
+        let dtAliasingWarning: string | undefined
+        if (sig.analysisMode === 'CT_aperiodic' && sig.analysisParams.samplingFc && e.spectrum.kind === 'continuous') {
+          aliasing = computeAliasingOverlay(e.spectrum, sig.analysisParams.samplingFc)
+        }
+        const isDT = sig.analysisMode === 'DT_aperiodic' || sig.analysisMode === 'DT_periodic' || sig.analysisMode === 'DT_DFT'
+        if (isDT && sig.node.kind === 'sampled') {
+          try {
+            const { fMin, fMax } = adaptiveFRange(sig.node.source)
+            const srcSpectrum = computeCTFourier(sig.node.source, { fMin, fMax })
+            const bw = estimateBandwidth(srcSpectrum)
+            if (bw > 0 && sig.node.fc < 2 * bw) {
+              dtAliasingWarning = `Aliasing: fc = ${sig.node.fc} Hz < 2B ≈ ${(2 * bw).toFixed(3)} Hz — lo spettro DTFT è distorto`
+            }
+          } catch { /* ignore */ }
+        }
+        return { ...e, aliasing, dtAliasingWarning }
+      })
+  }, [allSpectralEntries, allVisibleSignals])
+
+  const freqLabel = spectralEntries.some(e =>
+    e.analysisMode === 'DT_aperiodic' || e.analysisMode === 'DT_periodic' || e.analysisMode === 'DT_DFT'
+  ) ? 'f (normalizzata)' : 'f [Hz]'
 
   const hasExpression = signalDraft.expression.trim() !== ''
   const editorPreview = hasExpression
@@ -176,7 +252,6 @@ function App() {
     ? studyState.signals.find(s => s.id === editingSignalId) ?? null
     : null
 
-  // "Aggiorna" solo se qualcosa è cambiato
   const draftIsModified = editingSignal !== null && (
     signalDraft.expression !== editingSignal.expression ||
     signalDraft.label !== editingSignal.label ||
@@ -185,21 +260,57 @@ function App() {
     JSON.stringify(signalDraft.analysisParams) !== JSON.stringify(editingSignal.analysisParams)
   )
 
-  // Preview solo sul tab che corrisponde al dominio del draft
-  const showPreview = previewSignal && !isFrequencyTab && signalDraft.mode === chartMode
+  // Expression warnings: variable mismatch + DT aliasing
+  const expressionWarning = useMemo<{ kind: 'error' | 'warning'; msg: string } | null>(() => {
+    if (!hasExpression) return null
+    const norm = normalizeSignalInput(signalDraft.expression)
+    if (signalDraft.mode === 'time' && /(?<![a-zA-Z_0-9])n(?![a-zA-Z_0-9])/.test(norm)) {
+      return { kind: 'error', msg: "Variabile 'n' non valida in segnale CT — usa 't'" }
+    }
+    if (signalDraft.mode === 'discrete' && /(?<![a-zA-Z_0-9])t(?![a-zA-Z_0-9])/.test(norm)) {
+      return { kind: 'error', msg: "Variabile 't' non valida in segnale DT — usa 'n'" }
+    }
+    if (signalDraft.mode === 'discrete' && editorPreview?.ok) {
+      let zeros = 0
+      const total = 13
+      for (let n = -6; n <= 6; n++) {
+        if (Math.abs(evaluateSignal(editorPreview.signal, n)) < 0.01) zeros++
+      }
+      if (zeros === total) {
+        return { kind: 'warning', msg: 'Tutti i campioni interi sono 0 — possibile aliasing (es. sin(2πn)=0 per n∈ℤ)' }
+      }
+    }
+    return null
+  }, [hasExpression, signalDraft.mode, signalDraft.expression, editorPreview])
+
+  const showPreview = previewSignal && !isFrequencyTab && !isSettingsTab && signalDraft.mode === chartMode
   const plotSignals: PlotSignal[] = [
     ...chartSignals.map(s => ({ id: s.id, label: s.label, node: s.node, color: s.color, stats: s.stats })),
     ...(showPreview ? [previewSignal] : []),
   ]
 
   const availableAnalysisModes = signalDraft.mode === 'time' ? CT_ANALYSIS_MODES : DT_ANALYSIS_MODES
+  const quickExamples = getQuickExamples(signalDraft.mode)
 
   return (
     <main className="app-shell">
+      {samplingOpen && (
+        <SamplingModal
+          ctSignals={renderedSignals
+            .filter(s => s.mode === 'time')
+            .map(s => ({ id: s.id, label: s.label, node: s.node }))}
+          onSample={handleSample}
+          onClose={() => setSamplingOpen(false)}
+        />
+      )}
+
       <header className="topbar">
         <div className="topbar__group">
           <button type="button" className="topbar__button" onClick={() => setMenuOpen(v => !v)}>
             {menuOpen ? 'nascondi' : 'menu'}
+          </button>
+          <button type="button" className="topbar__button" onClick={() => setSamplingOpen(true)}>
+            campiona
           </button>
           {(['time', 'discrete', 'frequency', 'settings'] as const).map(tab => (
             <button
@@ -212,18 +323,28 @@ function App() {
             </button>
           ))}
         </div>
-
-        <div className="topbar__group topbar__group--meta">
-          <span>{studyState.signals.length} segnali</span>
-          <span>{studyState.settings.samplingRate} Hz</span>
-        </div>
       </header>
 
       <section className={menuOpen ? 'workspace workspace--open' : 'workspace workspace--closed'}>
         <section className="chart-pane">
           <div className="chart-stage">
-            {isFrequencyTab ? (
-              <SpectrumPlot entries={spectralEntries} frequencyLabel={freqLabel} showPhase={studyState.settings.showPhase} showTooltip={studyState.settings.showTooltip} />
+            {isSettingsTab ? (
+              <SignalPlot
+                mode="time"
+                signals={SETTINGS_PREVIEW_SIGNALS}
+                showGrid={studyState.settings.showGrid}
+                showTooltip={studyState.settings.showTooltip}
+                showLegend={studyState.settings.showLegend}
+              />
+            ) : isFrequencyTab ? (
+              <SpectrumPlot
+                entries={spectralEntries}
+                frequencyLabel={freqLabel}
+                showPhase={studyState.settings.showPhase}
+                showTooltip={studyState.settings.showTooltip}
+                showEnvelope={studyState.settings.showSpectrumEnvelope}
+                zoomKey={spectrumZoomKey}
+              />
             ) : (
               <SignalPlot
                 mode={studyState.activeTab === 'discrete' ? 'discrete' : 'time'}
@@ -232,12 +353,14 @@ function App() {
                 showGrid={studyState.settings.showGrid}
                 showTooltip={studyState.settings.showTooltip}
                 showLegend={studyState.settings.showLegend}
+                yRange={chartYRange ?? undefined}
+                dftWindows={dftWindows.length > 0 ? dftWindows : undefined}
               />
             )}
           </div>
 
           <div className="legend-strip">
-            {(isFrequencyTab ? allVisibleSignals : chartSignals).length > 0 ? (
+            {(isFrequencyTab ? allVisibleSignals : isSettingsTab ? [] : chartSignals).length > 0 ? (
               (isFrequencyTab ? allVisibleSignals : chartSignals).map(signal => (
                 <div key={signal.id} className="legend-item">
                   <button type="button" className="legend-item__edit" onClick={() => startEditing(signal)}>
@@ -252,7 +375,7 @@ function App() {
                 </div>
               ))
             ) : (
-              <span className="legend-empty">nessun segnale visibile</span>
+              <span className="legend-empty">{isSettingsTab ? 'settings' : 'nessun segnale visibile'}</span>
             )}
           </div>
         </section>
@@ -274,8 +397,9 @@ function App() {
                   <CompactToggle label="fase"
                     checked={studyState.settings.showPhase}
                     onChange={c => setStudyState({ ...studyState, settings: { ...studyState.settings, showPhase: c } })} />
-                  <CompactNumber label="sample Hz" value={studyState.settings.samplingRate}
-                    onChange={v => setStudyState({ ...studyState, settings: { ...studyState.settings, samplingRate: v } })} />
+                  <CompactToggle label="inviluppo spettro"
+                    checked={studyState.settings.showSpectrumEnvelope}
+                    onChange={c => setStudyState({ ...studyState, settings: { ...studyState.settings, showSpectrumEnvelope: c } })} />
                 </div>
               } />
             </div>
@@ -283,6 +407,31 @@ function App() {
             <div className="drawer__stack">
               {/* ── Editor segnale ── */}
               <CompactFieldGroup label={editingSignal ? `modifica: ${editingSignal.label}` : 'nuovo segnale'} content={
+                editingSignal?.node.kind === 'sampled' ? (
+                  <div className="drawer__stack drawer__stack--tight">
+                    <div className="expr-warning" style={{ borderColor: '#64748b', background: 'rgba(100,116,139,0.08)', color: '#94a3b8' }}>
+                      Segnale campionato a fc = <strong style={{ color: '#e2e8f0' }}>{(editingSignal.node as Extract<SignalNode, { kind: 'sampled' }>).fc} Hz</strong>.
+                      Per modificare, elimina e ricrea dalla finestra "campiona".
+                    </div>
+                    <CompactText label="label" value={signalDraft.label}
+                      onChange={v => setSignalDraft({ ...signalDraft, label: v.slice(0, 30) })} />
+                    <div className="drawer__actions">
+                      <button type="button" className="topbar__button topbar__button--active"
+                        onClick={() => {
+                          setStudyState({
+                            ...studyState,
+                            signals: studyState.signals.map(s =>
+                              s.id === editingSignalId ? { ...s, label: signalDraft.label.trim() || s.label } : s
+                            ),
+                          })
+                          cancelEditing()
+                        }}>
+                        aggiorna
+                      </button>
+                      <button type="button" className="topbar__button" onClick={cancelEditing}>annulla</button>
+                    </div>
+                  </div>
+                ) : (
                 <div className="drawer__stack drawer__stack--tight">
                   <CompactText label="label" value={signalDraft.label}
                     onChange={v => setSignalDraft({ ...signalDraft, label: v.slice(0, 30) })} />
@@ -290,6 +439,7 @@ function App() {
                   <label className="compact-field">
                     <span>espressione</span>
                     <ExpressionTextarea
+                      ref={exprRef}
                       value={signalDraft.expression}
                       placeholder="es: sin(2πt)"
                       rows={2}
@@ -314,18 +464,40 @@ function App() {
                     />
                   </label>
 
+                  {/* Parse error */}
+                  {editorPreview !== null && !editorPreview.ok && (
+                    <div className="expr-warning expr-warning--error">{editorPreview.error}</div>
+                  )}
+                  {/* Semantic warning/error */}
+                  {expressionWarning && (
+                    <div className={expressionWarning.kind === 'error' ? 'expr-warning expr-warning--error' : 'expr-warning expr-warning--warn'}>
+                      {expressionWarning.msg}
+                    </div>
+                  )}
+
                   <div className="drawer__grid">
                     <CompactSelect label="dominio" value={signalDraft.mode} options={['time', 'discrete']}
                       onChange={v => {
                         const m = v as ViewMode
                         const defaultMode: AnalysisMode = m === 'time' ? 'CT_aperiodic' : 'DT_aperiodic'
-                        setSignalDraft({ ...signalDraft, mode: m, analysisMode: defaultMode })
+                        const newExpr = m === 'discrete'
+                          ? swapVariable(signalDraft.expression, 't', 'n')
+                          : swapVariable(signalDraft.expression, 'n', 't')
+                        setSignalDraft({ ...signalDraft, expression: newExpr, mode: m, analysisMode: defaultMode })
+                        if (m === 'discrete' && studyState.activeTab === 'time') {
+                          setStudyState({ ...studyState, activeTab: 'discrete' })
+                        } else if (m === 'time' && studyState.activeTab === 'discrete') {
+                          setStudyState({ ...studyState, activeTab: 'time' })
+                        }
                       }} />
-                    {editorPreview !== null && (
-                      <div className={editorPreview.ok ? 'inline-status inline-status--ok' : 'inline-status inline-status--bad'}>
-                        {editorPreview.ok ? 'ok' : '⚠'}
-                      </div>
-                    )}
+                    {editorPreview !== null && (() => {
+                      const isOk = editorPreview.ok && expressionWarning?.kind !== 'error'
+                      return (
+                        <div className={isOk ? 'inline-status inline-status--ok' : 'inline-status inline-status--bad'}>
+                          {isOk ? 'ok' : 'err'}
+                        </div>
+                      )
+                    })()}
                   </div>
 
                   {/* Analisi spettrale */}
@@ -361,12 +533,6 @@ function App() {
                     </div>
                   )}
 
-                  {signalDraft.analysisMode === 'CT_aperiodic' && (
-                    <CompactNumber label="fc aliasing [Hz]" value={signalDraft.analysisParams.samplingFc ?? 0}
-                      min={0} step={0.1}
-                      onChange={v => setSignalDraft({ ...signalDraft, analysisParams: { ...signalDraft.analysisParams, samplingFc: v > 0 ? v : undefined } })} />
-                  )}
-
                   {signalDraft.analysisMode === 'DT_periodic' && (
                     <CompactNumber label="periodo N" value={signalDraft.analysisParams.period ?? 8}
                       min={2} step={1}
@@ -381,12 +547,14 @@ function App() {
 
                   <div className="drawer__actions">
                     {!editingSignal && hasExpression && (
-                      <button type="button" className="topbar__button topbar__button--active" onClick={saveSignal} disabled={!editorPreview?.ok}>
+                      <button type="button" className="topbar__button topbar__button--active" onClick={saveSignal}
+                        disabled={!editorPreview?.ok || expressionWarning?.kind === 'error'}>
                         aggiungi
                       </button>
                     )}
                     {editingSignal && draftIsModified && (
-                      <button type="button" className="topbar__button topbar__button--active" onClick={saveSignal} disabled={!editorPreview?.ok}>
+                      <button type="button" className="topbar__button topbar__button--active" onClick={saveSignal}
+                        disabled={!editorPreview?.ok || expressionWarning?.kind === 'error'}>
                         aggiorna
                       </button>
                     )}
@@ -396,20 +564,34 @@ function App() {
                   </div>
 
                   <div className="quick-legend">
-                    {QUICK_EXAMPLES.map(ex => (
+                    {quickExamples.map(ex => (
                       <button key={ex.label} type="button" className="quick-legend__button"
-                        onClick={() => setSignalDraft({
-                          label: ex.label,
-                          expression: ex.expression,
-                          mode: ex.mode,
-                          analysisMode: ex.analysisMode,
-                          analysisParams: ex.params ?? {},
-                        })}>
+                        onClick={() => {
+                          if (editingSignal && editingSignal.node.kind !== 'sampled') {
+                            // When editing an existing signal, insert expression at cursor position
+                            exprRef.current?.insertAtCursor(ex.expression)
+                          } else {
+                            // New signal: replace the whole draft
+                            setSignalDraft({
+                              label: ex.label,
+                              expression: ex.expression,
+                              mode: ex.mode,
+                              analysisMode: ex.analysisMode,
+                              analysisParams: ex.params ?? {},
+                            })
+                            if (ex.mode === 'discrete' && studyState.activeTab === 'time') {
+                              setStudyState({ ...studyState, activeTab: 'discrete' })
+                            } else if (ex.mode === 'time' && studyState.activeTab === 'discrete') {
+                              setStudyState({ ...studyState, activeTab: 'time' })
+                            }
+                          }
+                        }}>
                         {ex.label}
                       </button>
                     ))}
                   </div>
                 </div>
+                )
               } />
 
               {/* ── Lista segnali ── */}
@@ -432,6 +614,50 @@ function App() {
     </main>
   )
 
+  function handleSample(source: SourceSignalInfo, fc: number, addDFT: boolean, dftN: number) {
+    const sampledNode: SignalNode = { kind: 'sampled', source: source.node, fc }
+    const T = detectPeriod(sampledNode)
+    const N = T !== null ? T : null
+    const isPeriodic = N !== null && Number.isInteger(N)
+    const analysisMode: AnalysisMode = isPeriodic ? 'DT_periodic' : 'DT_aperiodic'
+    const analysisParams: AnalysisParams = isPeriodic ? { period: N as number, samplingFc: fc } : { samplingFc: fc }
+    const baseLabel = `${source.label}[n]`
+
+    const dtftSignal: StudySignal = {
+      id: `sig-${Date.now()}`,
+      label: baseLabel,
+      expression: `[campionato: ${source.label}, fc=${fc}]`,
+      mode: 'discrete',
+      visible: true,
+      showInfo: true,
+      node: sampledNode,
+      analysisMode,
+      analysisParams,
+    }
+
+    const newSignals: StudySignal[] = [dtftSignal]
+
+    if (addDFT) {
+      newSignals.push({
+        id: `sig-${Date.now() + 1}`,
+        label: `${baseLabel} DFT`,
+        expression: `[campionato: ${source.label}, fc=${fc}, DFT]`,
+        mode: 'discrete',
+        visible: true,
+        showInfo: true,
+        node: sampledNode,
+        analysisMode: 'DT_DFT',
+        analysisParams: { samplingFc: fc, dftN },
+      })
+    }
+
+    setStudyState({
+      ...studyState,
+      activeTab: 'discrete',
+      signals: [...studyState.signals, ...newSignals],
+    })
+  }
+
   function startEditing(signal: RenderedSignal) {
     setMenuOpen(true)
     setEditingSignalId(signal.id)
@@ -452,6 +678,7 @@ function App() {
   function saveSignal() {
     const parsed = parseSignalExpression(normalizeSignalInput(signalDraft.expression))
     if (!parsed.ok) return
+    if (expressionWarning?.kind === 'error') return
 
     if (editingSignalId) {
       setStudyState({
@@ -567,16 +794,17 @@ function createInitialState(): StudyState {
       showLegend: true,
       showTooltip: true,
       showPhase: true,
+      showSpectrumEnvelope: true,
       samplingRate: 24,
     },
     signals: fallbackSignals,
   }
 }
 
-function computeStats(node: SignalNode, mode: ViewMode, samplingRate: number): SignalStats {
+function computeStats(node: SignalNode, mode: ViewMode): SignalStats {
   const samples = mode === 'discrete'
     ? sampleDiscreteSignal(node)
-    : sampleSignal(node, -8, 8, Math.max(80, samplingRate * 8))
+    : sampleSignal(node, -8, 8, 400)
   return estimateSignalStats(node, samples)
 }
 
@@ -607,7 +835,6 @@ function CompactText({ label, value, onChange }: { label: string; value: string;
     </label>
   )
 }
-
 
 function CompactSelect({
   label, value, options, onChange, labels,

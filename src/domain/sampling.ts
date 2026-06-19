@@ -61,7 +61,7 @@ export function computeAliasingOverlay(
   }
 }
 
-function estimateBandwidth(spectrum: ContinuousSpectrum): number {
+export function estimateBandwidth(spectrum: ContinuousSpectrum): number {
   const maxMag = Math.max(...spectrum.magnitude)
   if (maxMag === 0) return 0
 

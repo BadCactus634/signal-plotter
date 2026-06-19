@@ -314,6 +314,26 @@
   font-size: 10px;
 }
 
+
+.expr-warning {
+  padding: 4px 6px;
+  font-size: 10px;
+  line-height: 1.35;
+  border-left: 2px solid;
+}
+
+.expr-warning--error {
+  background: rgba(239,68,68,0.08);
+  border-color: #ef4444;
+  color: #fca5a5;
+}
+
+.expr-warning--warn {
+  background: rgba(234,179,8,0.08);
+  border-color: #eab308;
+  color: #fde047;
+}
+
 .signals-list {
   display: grid;
   gap: 6px;
@@ -438,4 +458,91 @@
   .workspace--closed {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Finestra campionamento ──────────────────────────────────────────────────── */
+
+.sampling-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.60);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sampling-modal {
+  background: rgba(2, 6, 23, 0.98);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  padding: 1.1rem;
+  min-width: 300px;
+  max-width: 420px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+.sampling-modal__title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: #64748b;
+}
+
+.sampling-modal__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.sampling-modal__info strong {
+  color: #e2e8f0;
+}
+
+.sampling-modal__info--muted {
+  color: #64748b;
+  font-size: 10px;
+}
+
+.sampling-modal__suggest {
+  align-self: flex-start;
+  margin-top: 2px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.08);
+  color: #93c5fd;
+  padding: 3px 8px;
+  font-size: 10px;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.sampling-modal__suggest:hover {
+  background: rgba(96, 165, 250, 0.16);
+}
+
+/* ── SpectrumPlot con outer wrapper per warning ──────────────────────────────── */
+
+.spectrum-plot-outer {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.spectrum-plot-outer .signal-plot-wrap {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.spectrum-aliasing-banner {
+  flex-shrink: 0;
+  margin: 0 6px 4px;
+  font-size: 10px;
 }

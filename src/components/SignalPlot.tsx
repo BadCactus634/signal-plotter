@@ -11,6 +11,14 @@ type PlotSignal = {
   stats?: SignalStats
 }
 
+export type DFTWindowMarker = {
+  signalId: string
+  N: number
+  startN: number
+  node: SignalNode
+  color: string
+}
+
 type TooltipState = {
   svgX: number
   dataX: number
@@ -23,6 +31,8 @@ type SignalPlotProps = {
   showGrid?: boolean
   showTooltip?: boolean
   showLegend?: boolean
+  yRange?: { min: number; max: number }
+  dftWindows?: DFTWindowMarker[]
 }
 
 const W = 1000
@@ -37,6 +47,8 @@ export function SignalPlot({
   showGrid = true,
   showTooltip = true,
   showLegend = true,
+  yRange,
+  dftWindows,
 }: SignalPlotProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
@@ -44,14 +56,13 @@ export function SignalPlot({
   const [xRange, setXRange] = useState<[number, number]>(DEFAULT_RANGE)
   const [isDragging, setIsDragging] = useState(false)
 
-  // Refs so event handlers don't have stale closures
   const xRangeRef = useRef(xRange)
   xRangeRef.current = xRange
   const isDraggingRef = useRef(isDragging)
   isDraggingRef.current = isDragging
   const dragRef = useRef<{ startX: number; startRange: [number, number] } | null>(null)
 
-  // ── Wheel zoom — non-passive on the wrapper div ───────────────────────────
+  // ── Non-passive wheel on wrapper div ──────────────────────────────────────
   useLayoutEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
@@ -74,7 +85,7 @@ export function SignalPlot({
     return () => wrap.removeEventListener('wheel', onWheel)
   }, [])
 
-  // ── Global drag (window listeners) so pan works outside SVG bounds ────────
+  // ── Global pan via window listeners ───────────────────────────────────────
   useEffect(() => {
     function onWindowMouseMove(e: MouseEvent) {
       if (!isDraggingRef.current || !dragRef.current) return
@@ -122,8 +133,10 @@ export function SignalPlot({
   const rawMin = Math.min(...allValues, -0.5)
   const rawMax = Math.max(...allValues, 0.5)
   const padY = (rawMax - rawMin) * 0.08
-  const minValue = rawMin - padY
-  const maxValue = rawMax + padY
+
+  // Use provided yRange (from all signals) or computed from visible ones
+  const minValue = yRange ? yRange.min : rawMin - padY
+  const maxValue = yRange ? yRange.max : rawMax + padY
 
   const xScale = (x: number) => PAD + ((x - rangeStart) / (rangeEnd - rangeStart)) * (W - PAD * 2)
   const yScale = (y: number) => H - PAD - ((y - minValue) / Math.max(maxValue - minValue, 1e-6)) * (H - PAD * 2)
@@ -137,7 +150,6 @@ export function SignalPlot({
     markers: extractImpulseMarkers(sig.node),
   })).filter(({ markers }) => markers.length > 0)
 
-  // ── SVG coordinate helper ──────────────────────────────────────────────────
   function getSvgPos(e: React.MouseEvent) {
     const wrap = wrapRef.current
     if (!wrap) return null
@@ -160,7 +172,7 @@ export function SignalPlot({
   }
 
   function handleMouseMove(e: React.MouseEvent<HTMLDivElement>) {
-    if (isDragging) return // global window handler manages pan
+    if (isDragging) return
     if (!showTooltip) return
     const pos = getSvgPos(e)
     if (!pos) return
@@ -170,7 +182,14 @@ export function SignalPlot({
       return
     }
     const dataX = rangeStart + ((svgX - PAD) / (W - PAD * 2)) * (rangeEnd - rangeStart)
-    setTooltip({ svgX, dataX })
+    if (mode === 'discrete') {
+      const nearestN = Math.round(dataX)
+      const nearestSvgX = xScale(nearestN)
+      if (Math.abs(svgX - nearestSvgX) > 14) { setTooltip(null); return }
+      setTooltip({ svgX: nearestSvgX, dataX: nearestN })
+    } else {
+      setTooltip({ svgX, dataX })
+    }
   }
 
   function handleMouseLeave() {
@@ -181,15 +200,21 @@ export function SignalPlot({
     setXRange(DEFAULT_RANGE)
   }
 
-  // Tooltip sizing
   const maxLabelLen = visibleSignals.reduce((m, s) => Math.max(m, s.label.length), 3)
   const ttipW = Math.min(108, 36 + maxLabelLen * 5)
   const ttipRight = tooltip ? tooltip.svgX > W - ttipW - 30 : false
   const ttipX = tooltip ? (ttipRight ? tooltip.svgX - ttipW - 4 : tooltip.svgX + 6) : 0
 
-  // Legend sizing
+  // Compute legend box height dynamically (period label uses extra row)
+  const legendItems = visibleSignals.map(sig => ({
+    sig,
+    hasPeriod: !!sig.stats?.estimatedPeriod,
+  }))
+  const legendRowH = 16
+  const legendPeriodH = 10
+  const legendH = legendItems.reduce((h, item) => h + legendRowH + (item.hasPeriod ? legendPeriodH : 0), 8)
   const legendLabelMax = visibleSignals.reduce((m, s) => Math.max(m, s.label.length), 2)
-  const legendW = Math.min(140, 22 + legendLabelMax * 6.5)
+  const legendW = Math.min(130, 22 + legendLabelMax * 6.5)
 
   const isZoomed = xRange[0] !== DEFAULT_RANGE[0] || xRange[1] !== DEFAULT_RANGE[1]
 
@@ -266,26 +291,43 @@ export function SignalPlot({
           if (mode === 'discrete') {
             return (
               <g key={signal.id}>
-                {series.map(sample => (
-                  <g key={`${signal.id}-${sample.x}`}>
-                    <line x1={xScale(sample.x)} y1={yScale(0)} x2={xScale(sample.x)} y2={yScale(sample.y)}
-                      stroke={strokeColor} strokeWidth="2.5" opacity={opacity}
-                      strokeDasharray={dashArray} clipPath="url(#plotClip)" />
-                    <circle cx={xScale(sample.x)} cy={yScale(sample.y)} r="4"
-                      fill={strokeColor} opacity={opacity} />
-                  </g>
-                ))}
+                {series.map(sample => {
+                  const isZero = Math.abs(sample.y) < 1e-9
+                  return (
+                    <g key={`${signal.id}-${sample.x}`}>
+                      {!isZero && (
+                        <line x1={xScale(sample.x)} y1={yScale(0)} x2={xScale(sample.x)} y2={yScale(sample.y)}
+                          stroke={strokeColor} strokeWidth="2.5" opacity={opacity}
+                          strokeDasharray={dashArray} clipPath="url(#plotClip)" />
+                      )}
+                      {isZero ? (
+                        <circle cx={xScale(sample.x)} cy={yScale(0)} r="4"
+                          fill="none" stroke={strokeColor} strokeWidth="1.5" opacity={opacity * 0.55} />
+                      ) : (
+                        <circle cx={xScale(sample.x)} cy={yScale(sample.y)} r="5"
+                          fill={strokeColor} opacity={opacity} />
+                      )}
+                    </g>
+                  )
+                })}
               </g>
             )
           }
 
           const path = buildPath(series, xScale, yScale)
+          const fillPath = buildFillPath(series, xScale, yScale)
           return (
-            <path key={signal.id} d={path} fill="none"
-              stroke={strokeColor} strokeWidth="2.5"
-              strokeLinejoin="round" strokeLinecap="round"
-              opacity={opacity} strokeDasharray={dashArray}
-              clipPath="url(#plotClip)" />
+            <g key={signal.id}>
+              {fillPath && (
+                <path d={fillPath} fill={strokeColor} fillOpacity={signal.preview ? 0.06 : 0.10}
+                  stroke="none" clipPath="url(#plotClip)" />
+              )}
+              <path d={path} fill="none"
+                stroke={strokeColor} strokeWidth="2.5"
+                strokeLinejoin="round" strokeLinecap="round"
+                opacity={opacity} strokeDasharray={dashArray}
+                clipPath="url(#plotClip)" />
+            </g>
           )
         })}
 
@@ -313,6 +355,57 @@ export function SignalPlot({
           })
         )}
 
+        {/* DFT time-window: ghost replicas + boundary lines */}
+        {mode === 'discrete' && dftWindows?.map(dw => {
+          const x0 = xScale(dw.startN)
+          const xN = xScale(dw.startN + dw.N)
+          const ghostSamples = sampleDiscreteGhost(dw.node, rangeStart, rangeEnd, dw.startN, dw.N)
+          return (
+            <g key={`dfw-${dw.signalId}`}>
+              {/* Repliche temporali con opacità ridotta */}
+              <g opacity={0.28}>
+                {ghostSamples.map(sample => {
+                  const isZero = Math.abs(sample.y) < 1e-9
+                  return (
+                    <g key={`ghost-${sample.x}`}>
+                      {!isZero && (
+                        <line x1={xScale(sample.x)} y1={yScale(0)} x2={xScale(sample.x)} y2={yScale(sample.y)}
+                          stroke={dw.color} strokeWidth="2" clipPath="url(#plotClip)" />
+                      )}
+                      {isZero ? (
+                        <circle cx={xScale(sample.x)} cy={yScale(0)} r="3.5"
+                          fill="none" stroke={dw.color} strokeWidth="1.2" />
+                      ) : (
+                        <circle cx={xScale(sample.x)} cy={yScale(sample.y)} r="4"
+                          fill={dw.color} />
+                      )}
+                    </g>
+                  )
+                })}
+              </g>
+              {/* Linee verticali tratteggiate ai bordi del periodo DFT */}
+              {x0 >= PAD && x0 <= W - PAD && (
+                <g>
+                  <line x1={x0} y1={PAD} x2={x0} y2={H - PAD}
+                    stroke={dw.color} strokeWidth="1.5" strokeDasharray="6 3" strokeOpacity={0.65} />
+                  <text x={x0 + 3} y={PAD + 12} fill={dw.color} fontSize="8.5" fillOpacity={0.8}>
+                    n=0
+                  </text>
+                </g>
+              )}
+              {xN >= PAD && xN <= W - PAD && (
+                <g>
+                  <line x1={xN} y1={PAD} x2={xN} y2={H - PAD}
+                    stroke={dw.color} strokeWidth="1.5" strokeDasharray="6 3" strokeOpacity={0.65} />
+                  <text x={xN + 3} y={PAD + 12} fill={dw.color} fontSize="8.5" fillOpacity={0.8}>
+                    n=N={dw.N}
+                  </text>
+                </g>
+              )}
+            </g>
+          )
+        })}
+
         {/* Overlay Gibbs */}
         {gibbsSamples.length > 1 && (
           <path d={buildPath(gibbsSamples, xScale, yScale)}
@@ -339,30 +432,38 @@ export function SignalPlot({
           </g>
         )}
 
-        {/* Mini legenda */}
-        {showLegend && visibleSignals.length > 0 && (
-          <g>
-            <rect x={W - PAD - legendW - 4} y={PAD + 2}
-              width={legendW} height={visibleSignals.length * 16 + 8}
-              fill="rgba(255,255,255,0.88)" rx="4"
-              stroke="rgba(15,23,42,0.10)" strokeWidth="1" />
-            {visibleSignals.map((sig, i) => (
-              <g key={sig.id} transform={`translate(${W - PAD - legendW}, ${PAD + 7 + i * 16})`}>
-                <rect x={0} y={0} width={7} height={7} fill={sig.color} rx="1" />
-                <text x={11} y={8} fill="#1e293b" fontSize="9.5">{sig.label.slice(0, 14)}</text>
-                {sig.stats?.estimatedPeriod && (
-                  <text x={legendW - 22} y={8} fill="#64748b" fontSize="8">T={sig.stats.estimatedPeriod.toFixed(1)}</text>
-                )}
-              </g>
-            ))}
-          </g>
-        )}
+        {/* Mini legenda — period on second line per signal */}
+        {showLegend && visibleSignals.length > 0 && (() => {
+          let yOff = 7
+          return (
+            <g>
+              <rect x={W - PAD - legendW - 4} y={PAD + 2}
+                width={legendW} height={legendH}
+                fill="rgba(255,255,255,0.88)" rx="4"
+                stroke="rgba(15,23,42,0.10)" strokeWidth="1" />
+              {legendItems.map(({ sig, hasPeriod }) => {
+                const thisY = yOff
+                yOff += legendRowH + (hasPeriod ? legendPeriodH : 0)
+                return (
+                  <g key={sig.id} transform={`translate(${W - PAD - legendW}, ${PAD + thisY})`}>
+                    <rect x={0} y={0} width={7} height={7} fill={sig.color} rx="1" />
+                    <text x={11} y={8} fill="#1e293b" fontSize="9.5">{sig.label.slice(0, 16)}</text>
+                    {hasPeriod && (
+                      <text x={11} y={17} fill="#64748b" fontSize="8">T={sig.stats!.estimatedPeriod!.toFixed(2)}</text>
+                    )}
+                  </g>
+                )
+              })}
+            </g>
+          )
+        })()}
 
-        {/* Reset zoom */}
+        {/* Reset zoom — pointerEvents: all so it works with pointer-events:none SVG */}
         {isZoomed && (
-          <g style={{ cursor: 'pointer' }} onMouseDown={e => { e.stopPropagation(); setXRange(DEFAULT_RANGE) }}>
-            <rect x={PAD + 2} y={PAD + 2} width={40} height={14} fill="rgba(100,116,139,0.18)" rx="2" />
-            <text x={PAD + 22} y={PAD + 12} textAnchor="middle" fill="#64748b" fontSize="9">↺ reset</text>
+          <g style={{ cursor: 'pointer', pointerEvents: 'all' }}
+            onMouseDown={e => { e.stopPropagation(); setXRange(DEFAULT_RANGE) }}>
+            <rect x={PAD + 2} y={PAD + 2} width={38} height={14} fill="rgba(100,116,139,0.18)" rx="2" />
+            <text x={PAD + 21} y={PAD + 12} textAnchor="middle" fill="#64748b" fontSize="9">reset</text>
           </g>
         )}
 
@@ -383,6 +484,33 @@ function sampleDiscrete(node: SignalNode, start: number, end: number): SignalSam
     values.push({ x, y: evaluateSignal(node, x) })
   }
   return values
+}
+
+function sampleDiscreteGhost(
+  node: SignalNode,
+  start: number,
+  end: number,
+  windowStart: number,
+  windowN: number,
+): SignalSample[] {
+  const values: SignalSample[] = []
+  for (let x = Math.floor(start); x <= Math.ceil(end); x++) {
+    if (x >= windowStart && x < windowStart + windowN) continue
+    const nWrap = ((x - windowStart) % windowN + windowN) % windowN + windowStart
+    values.push({ x, y: evaluateSignal(node, nWrap) })
+  }
+  return values
+}
+
+function buildFillPath(
+  samples: SignalSample[],
+  xScale: (v: number) => number,
+  yScale: (v: number) => number,
+): string {
+  if (samples.length < 2) return ''
+  const y0 = yScale(0).toFixed(1)
+  const pts = samples.map(s => `${xScale(s.x).toFixed(1)},${yScale(s.y).toFixed(1)}`)
+  return `M ${xScale(samples[0].x).toFixed(1)},${y0} L ${pts.join(' L ')} L ${xScale(samples[samples.length - 1].x).toFixed(1)},${y0} Z`
 }
 
 function buildPath(
